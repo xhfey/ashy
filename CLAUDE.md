@@ -1,0 +1,279 @@
+# 🤖 ASHY BOT - AI DEVELOPER REFERENCE
+
+> **ALWAYS READ THIS FIRST** before making any changes.
+
+## Quick Start
+
+```bash
+# Install dependencies
+npm install
+
+# Start database (Docker required)
+docker-compose up -d
+
+# Generate Prisma client
+npm run db:generate
+
+# Push schema to database
+npm run db:push
+
+# Deploy commands to Discord
+npm run deploy
+
+# Start bot
+npm run dev
+```
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+See [.env.example](file:///c:/Users/Prese/Desktop/Ash%20bot/.env.example) for all required variables.
+
+
+## NPM Scripts
+
+| Script | Description |
+|--------|-------------|
+| `npm run dev` | Start bot with auto-reload |
+| `npm start` | Production start |
+| `npm run deploy` | Deploy slash commands to Discord |
+| `npm test` | Run Jest tests |
+| `npm run db:generate` | Generate Prisma client |
+| `npm run db:push` | Push schema to database |
+| `npm run db:migrate` | Run migrations |
+| `npm run db:studio` | Open Prisma Studio GUI |
+| `npm run db:reset` | Reset database (⚠️ destructive) |
+
+## Project Overview
+
+**Ashy Bot** is an Arabic Discord gaming bot with:
+- 11 multiplayer games
+- Virtual currency (عملات آشي / Ashy Coins)
+- Weekly leaderboards with prizes
+- Anti-abuse/fraud detection
+- Tournament system
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|------------|
+| Runtime | Node.js 18+ (ES Modules) |
+| Framework | Discord.js v14 |
+| Database | PostgreSQL + Prisma |
+| Images | node-canvas + sharp |
+| Logging | winston |
+
+## 🚨 CRITICAL RULES
+
+### 1. Language Requirements
+```javascript
+// ✅ CORRECT - Arabic user-facing text
+.setName('رصيد')
+.setDescription('تحقق من رصيدك من عملات آشي')
+await interaction.reply('✅ تم بنجاح!')
+
+// ❌ WRONG - English user-facing text
+.setName('balance')
+.setDescription('Check your balance')
+```
+
+### 2. Currency Operations - ALWAYS Use Transactions
+```javascript
+// ✅ CORRECT - Atomic transaction
+await prisma.$transaction([
+  prisma.user.update({
+    where: { id: senderId },
+    data: { ashyCoins: { decrement: amount } }
+  }),
+  prisma.user.update({
+    where: { id: recipientId },
+    data: { ashyCoins: { increment: amount } }
+  }),
+  prisma.transaction.create({ data: { ... } })
+]);
+
+// ❌ WRONG - Separate operations (can cause inconsistency)
+await prisma.user.update({ ... });
+await prisma.user.update({ ... });
+```
+
+### 3. Error Handling - Use Centralized Wrapper
+
+Use `wrapCommand()` from `src/utils/commandWrapper.js`:
+
+```javascript
+import { wrapCommand, Errors } from '../../utils/commandWrapper.js';
+
+// ✅ CORRECT - Clean, no try-catch needed
+export default wrapCommand({
+  data: new SlashCommandBuilder()...
+  
+  async execute(interaction) {
+    // Throw typed errors for user-friendly messages
+    if (balance < amount) {
+      throw new Errors.InsufficientBalanceError(amount, balance);
+    }
+    // ... your logic
+  }
+});
+
+// Available error types:
+// - Errors.InsufficientBalanceError(needed, have)
+// - Errors.CooldownError(remainingSeconds)
+// - Errors.PermissionError()
+// - Errors.GameError('ALREADY_IN_GAME' | 'GAME_FULL' | etc.)
+// - Errors.ValidationError(message, userMessage)
+```
+
+### 4. Game Sessions
+- Use **Map** for active games (speed > persistence)
+- **One game per channel** at a time
+- **Always cleanup** when game ends or times out
+
+### 5. Discord Localization (Optional)
+For bilingual support, use `localizeCommand()`:
+
+```javascript
+import { localizeCommand } from '../../utils/localization.js';
+
+data: localizeCommand(
+  new SlashCommandBuilder(),
+  { ar: 'رصيد', en: 'balance' },
+  { ar: 'تحقق من رصيدك', en: 'Check your balance' }
+)
+```
+
+## File Organization
+
+| Path | Purpose |
+|------|---------|
+| `src/commands/` | Slash command handlers |
+| `src/services/` | Business logic (no Discord API) |
+| `src/events/` | Discord.js event handlers |
+| `src/middleware/` | Reusable checks (cooldown, permissions) |
+| `src/utils/` | Pure utility functions |
+| `src/config/` | Configuration constants |
+| `src/localization/` | Arabic text strings |
+| `docs/patterns/` | **Implementation patterns** (read `game-template.md` before building games!) |
+| `docs/decisions/` | Architecture Decision Records (ADRs) |
+
+## Command Structure
+
+```javascript
+// src/commands/games/example/index.js
+import { SlashCommandBuilder } from 'discord.js';
+import { wrapCommand } from '../../../utils/commandWrapper.js';
+import { localizeCommand } from '../../../utils/localization.js';
+import strings from '../../../localization/ar.json' assert { type: 'json' };
+
+export default wrapCommand({
+  data: localizeCommand(
+    new SlashCommandBuilder(),
+    { ar: 'اسم-الأمر', en: 'command-name' },
+    { ar: 'وصف الأمر بالعربي', en: 'English description' }
+  ),
+
+  async execute(interaction) {
+    // No try-catch needed - wrapCommand handles errors
+    await interaction.reply('...');
+  },
+
+  // Optional: Handle button clicks
+  async handleButton(interaction, sessionId, action) {
+    // Also automatically wrapped with error handling
+  }
+});
+```
+
+## Testing
+
+```bash
+# Run all tests
+npm test
+
+# Run specific test file
+npm test -- tests/unit/currency.test.js
+
+# Run with coverage
+npm test -- --coverage
+```
+
+**Test files location:**
+- Unit tests: `tests/unit/`
+- Integration tests: `tests/integration/`
+
+**Testing slash commands:**
+1. Set `DISCORD_GUILD_ID` in `.env` to a test server
+2. Commands deploy instantly to that server
+3. Production deploys globally (takes ~1 hour)
+
+## Anti-Abuse System
+
+Located in `src/services/economy/` and `src/middleware/`:
+
+| Protection | Location | Description |
+|------------|----------|-------------|
+| Cooldowns | `middleware/cooldown.js` | Rate limits per command per user |
+| Eligibility | `middleware/eligibility.js` | Account age/verification checks |
+| Transaction audit | `services/economy/` | All coin movements logged |
+| Session limits | `services/games/` | One game per user/channel |
+
+## Database Models
+
+| Model | Purpose |
+|-------|---------|
+| User | Player profile, coin balance, eligibility |
+| Transaction | Audit trail for all coin movements |
+| GameStat | Per-game statistics per player |
+| GameSession | Active game state |
+| Tournament | Tournament metadata |
+| TournamentEntry | Player tournament registrations |
+| PerkPurchase | In-game power-up purchases |
+
+## Games List & Status
+
+| # | Command | Arabic Name | Players | Status |
+|---|---------|-------------|---------|--------|
+| 1 | /حجر-ورقة-مقص | حجر ورقة مقص | 2-20 | ⬜ Not Started |
+| 2 | /نرد | نرد | 2-10 | ✅ Complete |
+| 3 | /روليت | روليت | 4-20 | ✅ Complete |
+| 4 | /اكس-او | إكس أو | 2-6 | ⬜ Not Started |
+| 5 | /كراسي | كراسي | 4-20 | ⬜ Not Started |
+| 6 | /مافيا | مافيا | 5-20 | ⬜ Not Started |
+| 7 | /الغميضة | الغميضة | 4-20 | ⬜ Not Started |
+| 8 | /نسخة | نسخة | 4-10 | ⬜ Not Started |
+| 9 | /خمن-الدولة | خمن الدولة | 2-8 | ⬜ Not Started |
+| 10 | /اكس-او-ساخن | إكس أو ساخن | 2-6 | ⬜ Not Started |
+| 11 | /عجلة-الموت | عجلة الموت | 3-4 | ⬜ Not Started |
+
+## Perks System
+
+| Perk | Arabic | Price | Effect |
+|------|--------|-------|--------|
+| Extra Life | حياة إضافية | 130 | Survive one elimination |
+| Shield | درع | 200 | Reflect kick to attacker |
+| Double Kick | طرد مرتين | 150 | Eliminate 2 players (buy during kick turn) |
+
+## Weekly Leaderboard Rewards
+
+| Place | Reward |
+|-------|--------|
+| 🥇 1st | 1,500 coins |
+| 🥈 2nd | 700 coins |
+| 🥉 3rd | 300 coins |
+
+## Adding a New Feature
+
+1. Check ROADMAP.md for current phase
+2. Only work on current phase tasks
+3. Follow patterns in existing code
+4. Use Arabic for all user text
+5. Use `wrapCommand()` for error handling
+6. Update ROADMAP.md when done
+7. Update this status table if adding games
+

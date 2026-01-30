@@ -1,0 +1,166 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// USER & ECONOMY
+// ==========================================
+
+model User {
+  id              String    @id // Discord User ID
+  ashyCoins       Int       @default(0)
+  isEligible      Boolean   @default(true)
+
+  // Timestamps
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastActive      DateTime  @default(now())
+
+  // Relations
+  transactions      Transaction[]
+  gameStats         GameStat[]
+  tournamentEntries TournamentEntry[]
+  perkPurchases     PerkPurchase[]
+
+  @@map("users")
+}
+
+model Transaction {
+  id          Int       @id @default(autoincrement())
+  userId      String
+  amount      Int       // Positive = earned, Negative = spent
+  type        String    // GAME_WIN, TRANSFER_SEND, TRANSFER_RECEIVE, WEEKLY_REWARD, PERK_PURCHASE, TOURNAMENT_ENTRY, TOURNAMENT_WIN
+  source      String    // Game name, TRANSFER, WEEKLY, etc.
+  recipientId String?   // For transfers only
+  metadata    Json?     // Additional context data
+  createdAt   DateTime  @default(now())
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([type])
+  @@map("transactions")
+}
+
+// ==========================================
+// GAME STATISTICS
+// ==========================================
+
+model GameStat {
+  id            Int       @id @default(autoincrement())
+  userId        String
+  gameType      String    // RPS, DICE, ROULETTE, XO, CHAIRS, MAFIA, HIDESEEK, REPLICA, GUESS_COUNTRY, HOT_XO, DEATH_WHEEL
+
+  // Lifetime stats
+  totalWins     Int       @default(0)
+  totalLosses   Int       @default(0)
+  totalGames    Int       @default(0)
+  totalEarned   Int       @default(0)
+  totalSpent    Int       @default(0)
+
+  // Weekly stats (reset every Friday)
+  weeklyWins    Int       @default(0)
+  weeklyGames   Int       @default(0)
+
+  lastPlayed    DateTime  @default(now())
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gameType])
+  @@index([gameType, weeklyWins(sort: Desc)])
+  @@map("game_stats")
+}
+
+// ==========================================
+// GAME SESSIONS (Active Games)
+// ==========================================
+
+model GameSession {
+  id            String    @id @default(uuid())
+  gameType      String
+  guildId       String
+  channelId     String
+  messageId     String?   // The game embed message
+
+  // Players: [{ userId, username, avatarURL, status, ... }]
+  players       Json
+  // Game-specific state data
+  gameState     Json
+
+  status        String    @default("WAITING") // WAITING, ACTIVE, COMPLETED, CANCELLED
+  winnerId      String?
+
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  @@index([status])
+  @@index([channelId, status])
+  @@map("game_sessions")
+}
+
+// ==========================================
+// TOURNAMENTS
+// ==========================================
+
+model Tournament {
+  id            Int       @id @default(autoincrement())
+  gameType      String
+  guildId       String
+  channelId     String
+  messageId     String?
+
+  entryFee      Int       @default(0)
+  prizePool     Int       @default(0)
+  maxPlayers    Int       @default(16)
+
+  status        String    @default("OPEN") // OPEN, IN_PROGRESS, COMPLETED, CANCELLED
+  winnerId      String?
+
+  createdAt     DateTime  @default(now())
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  entries       TournamentEntry[]
+
+  @@index([status, createdAt])
+  @@map("tournaments")
+}
+
+model TournamentEntry {
+  id            Int         @id @default(autoincrement())
+  tournamentId  Int
+  userId        String
+  placement     Int?        // Final placement (1, 2, 3, etc.)
+  createdAt     DateTime    @default(now())
+
+  tournament    Tournament  @relation(fields: [tournamentId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tournamentId, userId])
+  @@map("tournament_entries")
+}
+
+// ==========================================
+// PERKS (In-Game Power-ups)
+// ==========================================
+
+model PerkPurchase {
+  id            Int       @id @default(autoincrement())
+  userId        String
+  gameSessionId String
+  perkType      String    // EXTRA_LIFE, SHIELD, DOUBLE_KICK
+  cost          Int
+  used          Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([gameSessionId, used])
+  @@map("perk_purchases")
+}

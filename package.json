@@ -1,0 +1,44 @@
+{
+  "name": "ashy-bot",
+  "version": "0.1.0",
+  "description": "Arabic Discord gaming bot with 11 multiplayer games and economy system",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "deploy": "node src/deploy-commands.js",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "db:reset": "prisma migrate reset",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "games",
+    "arabic",
+    "economy"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@prisma/client": "^5.8.1",
+    "@upstash/redis": "^1.36.1",
+    "canvas": "^2.11.2",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.1",
+    "gif-encoder-2": "^1.0.5",
+    "node-cron": "^3.0.3",
+    "sharp": "^0.33.2",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "prisma": "^5.8.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

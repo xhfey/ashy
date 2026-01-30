@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check:*)",
+      "Bash(npm install:*)",
+      "Bash(find:*)",
+      "Bash(node --experimental-vm-modules -e:*)"
+    ]
+  }
+}
