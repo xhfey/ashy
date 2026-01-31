@@ -4,7 +4,10 @@
       "Bash(node --check:*)",
       "Bash(npm install:*)",
       "Bash(find:*)",
-      "Bash(node --experimental-vm-modules -e:*)"
+      "Bash(node --experimental-vm-modules -e:*)",
+      "Bash(xargs:*)",
+      "Bash(dir:*)",
+      "Bash(node:*)"
     ]
   }
 }

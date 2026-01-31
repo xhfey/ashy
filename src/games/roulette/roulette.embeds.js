@@ -4,30 +4,28 @@
  */
 
 import { EmbedBuilder } from 'discord.js';
-import { EMBED_COLORS, PERKS, NUMBER_EMOJIS, GAME_SETTINGS } from './constants.js';
+import { EMBED_COLORS, PERKS, NUMBER_EMOJIS, GAME_SETTINGS } from './roulette.constants.js';
 
 /**
  * Create lobby embed showing available slots and current players
  */
 export function createLobbyEmbed(session, remainingSeconds) {
-  const players = session.gameState.players || new Map();
-  const usedSlots = new Set([...players.values()].map(p => p.slotNumber));
+  const players = session.players || [];
 
   // Build player list with slot numbers
   let playerList = '';
-  const sortedPlayers = [...players.values()].sort((a, b) => a.slotNumber - b.slotNumber);
+  const sortedPlayers = [...players].sort((a, b) => (a.slot || 0) - (b.slot || 0));
 
   if (sortedPlayers.length === 0) {
     playerList = '> لا يوجد لاعبين بعد';
   } else {
     playerList = sortedPlayers
-      .map(p => `> ${NUMBER_EMOJIS[p.slotNumber] || p.slotNumber} <@${p.userId}>`)
+      .map(p => `> ${NUMBER_EMOJIS[p.slot] || p.slot} <@${p.userId}>`)
       .join('\n');
   }
 
   // Available slots indicator
-  const availableCount = GAME_SETTINGS.maxSlots - players.size;
-  const slotsStatus = `${players.size}/${GAME_SETTINGS.maxSlots} لاعب`;
+  const slotsStatus = `${players.length}/${GAME_SETTINGS.maxPlayers} لاعب`;
 
   const embed = new EmbedBuilder()
     .setTitle('🎡 روليت')
@@ -61,7 +59,7 @@ export function createLobbyEmbed(session, remainingSeconds) {
 /**
  * Create shop embed showing available perks
  */
-export function createShopEmbed(userId, ownedPerks = []) {
+export function createShopEmbed(userId, ownedPerks = [], balance = 0) {
   const perksList = Object.values(PERKS)
     .filter(p => p.phase === 'lobby')
     .map(perk => {
@@ -74,6 +72,7 @@ export function createShopEmbed(userId, ownedPerks = []) {
   return new EmbedBuilder()
     .setTitle('🛒 متجر البيركات')
     .setDescription(
+      `💰 **رصيدك:** ${balance} عملة\n\n` +
       'اشترِ بيركات لمساعدتك في اللعبة!\n\n' +
       perksList
     )
@@ -88,7 +87,7 @@ export function createGameStartEmbed() {
   return new EmbedBuilder()
     .setTitle('🎡 روليت')
     .setDescription(
-      '**تم توزيع الأرقام على كل لاعب.**\n\n' +
+      '**بدأت اللعبة!**\n\n' +
       '⏳ ستبدأ الجولة الأولى في بضع ثواني...'
     )
     .setColor(EMBED_COLORS.playing);
@@ -99,7 +98,7 @@ export function createGameStartEmbed() {
  */
 export function createRoundEmbed(roundNumber, alivePlayers) {
   const playerList = alivePlayers
-    .map(p => `${NUMBER_EMOJIS[p.slotNumber] || p.slotNumber} ${p.displayName}`)
+    .map(p => `${NUMBER_EMOJIS[p.slot] || p.slot} ${p.displayName}`)
     .join(' • ');
 
   return new EmbedBuilder()
@@ -119,8 +118,8 @@ export function createChosenEmbed(player, roundNumber) {
   return new EmbedBuilder()
     .setTitle(`🎡 الجولة ${roundNumber}`)
     .setDescription(
-      `${NUMBER_EMOJIS[player.slotNumber] || player.slotNumber} **تم اختيارك!**\n\n` +
-      `<@${player.userId}> لديك **30 ثانية** لاختيار لاعب لطرده.`
+      `${NUMBER_EMOJIS[player.slot] || player.slot} **تم اختيارك!**\n\n` +
+      `<@${player.userId}> لديك **${GAME_SETTINGS.kickTimeout} ثانية** لاختيار لاعب لطرده.`
     )
     .setColor(EMBED_COLORS.kick);
 }
@@ -130,7 +129,7 @@ export function createChosenEmbed(player, roundNumber) {
  */
 export function createKickSelectionEmbed(kickerPlayer, targetPlayers, hasDoubleKick = false) {
   const targetsList = targetPlayers
-    .map(p => `${NUMBER_EMOJIS[p.slotNumber] || p.slotNumber} ${p.displayName}`)
+    .map(p => `${NUMBER_EMOJIS[p.slot] || p.slot} ${p.displayName}`)
     .join('\n');
 
   let description = `<@${kickerPlayer.userId}> اختر لاعباً لطرده:\n\n${targetsList}`;
@@ -143,7 +142,7 @@ export function createKickSelectionEmbed(kickerPlayer, targetPlayers, hasDoubleK
     .setTitle('⚔️ اختر ضحيتك')
     .setDescription(description)
     .setColor(EMBED_COLORS.kick)
-    .setFooter({ text: '⏱️ 30 ثانية للاختيار أو ستُطرد أنت!' });
+    .setFooter({ text: `⏱️ ${GAME_SETTINGS.kickTimeout} ثانية للاختيار أو ستُطرد أنت!` });
 }
 
 /**
@@ -180,6 +179,24 @@ export function createExtraLifeEmbed(player) {
 }
 
 /**
+ * Create shield reflect embed
+ */
+export function createShieldReflectEmbed(target, attacker, attackerSurvived = false) {
+  let description = `🛡️ <@${target.userId}> استخدم **الدرع** وعكس الهجوم!`;
+
+  if (attackerSurvived) {
+    description += `\n\n❤️ <@${attacker.userId}> استخدم **حياة إضافية** ونجا!`;
+  } else {
+    description += `\n\n💀 <@${attacker.userId}> تم طرده!`;
+  }
+
+  return new EmbedBuilder()
+    .setTitle('🛡️ انعكاس!')
+    .setDescription(description)
+    .setColor(EMBED_COLORS.kick);
+}
+
+/**
  * Create final round embed
  */
 export function createFinalRoundEmbed(player1, player2) {
@@ -187,9 +204,9 @@ export function createFinalRoundEmbed(player1, player2) {
     .setTitle('👑 الجولة الأخيرة!')
     .setDescription(
       '**هذه الجولة الأخيرة!**\n\n' +
-      `${NUMBER_EMOJIS[player1.slotNumber] || player1.slotNumber} <@${player1.userId}>\n` +
+      `${NUMBER_EMOJIS[player1.slot] || player1.slot} <@${player1.userId}>\n` +
       `⚔️ ضد\n` +
-      `${NUMBER_EMOJIS[player2.slotNumber] || player2.slotNumber} <@${player2.userId}>\n\n` +
+      `${NUMBER_EMOJIS[player2.slot] || player2.slot} <@${player2.userId}>\n\n` +
       '🎰 اللاعب المختار هو **الفائز**!'
     )
     .setColor(EMBED_COLORS.winner);
@@ -249,6 +266,7 @@ export default {
   createKickSelectionEmbed,
   createEliminationEmbed,
   createExtraLifeEmbed,
+  createShieldReflectEmbed,
   createFinalRoundEmbed,
   createWinnerEmbed,
   createCancelledEmbed,

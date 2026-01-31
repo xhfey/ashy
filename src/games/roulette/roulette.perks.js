@@ -3,10 +3,10 @@
  * Handles perk purchases and usage during the game
  */
 
-import * as CurrencyService from '../../../services/economy/currency.service.js';
-import { TransactionType } from '../../../services/economy/transaction.service.js';
-import logger from '../../../utils/logger.js';
-import { PERKS } from './constants.js';
+import * as CurrencyService from '../../services/economy/currency.service.js';
+import { TransactionType } from '../../services/economy/transaction.service.js';
+import logger from '../../utils/logger.js';
+import { PERKS } from './roulette.constants.js';
 
 /**
  * Purchase a perk for a player
@@ -36,7 +36,7 @@ export async function purchasePerk(userId, perkId, sessionId) {
       }
     );
 
-    logger.info(`Perk purchased: ${userId} bought ${perkId} for ${perk.cost} coins`);
+    logger.info(`[Roulette] Perk purchased: ${userId} bought ${perkId} for ${perk.cost} coins`);
 
     return {
       success: true,
@@ -47,51 +47,51 @@ export async function purchasePerk(userId, perkId, sessionId) {
     if (error.name === 'InsufficientBalanceError') {
       return { success: false, error: 'INSUFFICIENT_BALANCE' };
     }
-    logger.error('Perk purchase error:', error);
+    logger.error('[Roulette] Perk purchase error:', error);
     throw error;
   }
 }
 
 /**
  * Check if player has a specific perk
- * @param {Map} players - Players map from game state
+ * @param {Array} players - Players array from game state
  * @param {string} userId - Player's Discord ID
  * @param {string} perkId - Perk ID to check
  * @returns {boolean}
  */
 export function hasActivePerk(players, userId, perkId) {
-  const player = players.get(userId);
+  const player = players.find(p => p.userId === userId);
   if (!player) return false;
   return Array.isArray(player.perks) && player.perks.includes(perkId);
 }
 
 /**
  * Use a perk (mark it as consumed)
- * @param {Map} players - Players map from game state
+ * @param {Array} players - Players array from game state
  * @param {string} userId - Player's Discord ID
  * @param {string} perkId - Perk ID to use
  * @returns {boolean} - Whether perk was available and consumed
  */
 export function usePerk(players, userId, perkId) {
-  const player = players.get(userId);
+  const player = players.find(p => p.userId === userId);
   if (!player || !Array.isArray(player.perks) || !player.perks.includes(perkId)) {
     return false;
   }
 
   player.perks = player.perks.filter(p => p !== perkId);
-  logger.debug(`Perk used: ${userId} consumed ${perkId}`);
+  logger.debug(`[Roulette] Perk used: ${userId} consumed ${perkId}`);
   return true;
 }
 
 /**
  * Add perk to player's inventory
- * @param {Map} players - Players map from game state
+ * @param {Array} players - Players array from game state
  * @param {string} userId - Player's Discord ID
  * @param {string} perkId - Perk ID to add
  * @returns {boolean} - Whether perk was added successfully
  */
 export function addPerk(players, userId, perkId) {
-  const player = players.get(userId);
+  const player = players.find(p => p.userId === userId);
   if (!player) return false;
 
   if (!Array.isArray(player.perks)) {
@@ -106,12 +106,12 @@ export function addPerk(players, userId, perkId) {
 
 /**
  * Get list of perks owned by a player
- * @param {Map} players - Players map from game state
+ * @param {Array} players - Players array from game state
  * @param {string} userId - Player's Discord ID
  * @returns {string[]} - Array of perk IDs
  */
 export function getOwnedPerks(players, userId) {
-  const player = players.get(userId);
+  const player = players.find(p => p.userId === userId);
   if (!player || !Array.isArray(player.perks)) return [];
 
   return player.perks;
@@ -119,11 +119,25 @@ export function getOwnedPerks(players, userId) {
 
 /**
  * Process kick attempt - handles shield and extra life logic
- * @param {Map} players - Players map from game state
+ * This is the core perk interaction logic:
+ *
+ * 1. Target has SHIELD:
+ *    - Shield is consumed
+ *    - Kick reflects to attacker
+ *    - If attacker has EXTRA_LIFE:
+ *      - Extra life consumed, attacker survives
+ *    - Else: attacker eliminated
+ *
+ * 2. Target has EXTRA_LIFE (no shield):
+ *    - Extra life consumed, target survives
+ *
+ * 3. No perks: target eliminated
+ *
+ * @param {Array} players - Players array from game state
  * @param {string} kickerId - ID of player doing the kick
  * @param {string} targetId - ID of player being kicked
  * @returns {{
- *   eliminated: string | null,  // ID of player who actually gets eliminated
+ *   eliminated: string | null,
  *   reason: 'kicked' | 'shield_reflect' | 'extra_life_saved' | null,
  *   extraLifeUsed: boolean,
  *   shieldUsed: boolean,
@@ -184,7 +198,7 @@ export async function canBuyDoubleKick(userId) {
     const canBuy = balance >= PERKS.DOUBLE_KICK.cost;
     return { canBuy, balance };
   } catch (error) {
-    logger.error('Error checking double kick eligibility:', error);
+    logger.error('[Roulette] Error checking double kick eligibility:', error);
     return { canBuy: false, balance: 0 };
   }
 }
