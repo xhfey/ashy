@@ -24,6 +24,7 @@ import GIFEncoder from 'gif-encoder-2';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import logger from '../../utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -38,7 +39,7 @@ try {
     registerFont(path.join(fontPath, 'Cinzel-Bold.ttf'), { family: 'Cinzel', weight: '700' });
   }
 } catch (e) {
-  console.warn('Font registration failed:', e.message);
+  logger.warn(`[WheelGenerator] Font registration failed: ${e.message}`);
 }
 
 // ==================== CONSTANTS ====================
@@ -101,20 +102,24 @@ const ANIMATION = {
 
 // ==================== ASSET CACHE ====================
 
+// Cache promises (not results) to prevent race conditions and log spam
 const imageCache = new Map();
 
-async function loadAsset(filename) {
+function loadAsset(filename) {
   if (imageCache.has(filename)) return imageCache.get(filename);
 
-  try {
-    const assetPath = path.join(__dirname, '../../../assets/images/roulette', filename);
-    const img = await loadImage(assetPath);
-    imageCache.set(filename, img);
-    return img;
-  } catch (e) {
-    console.error(`Failed to load asset ${filename}:`, e.message);
-    return null;
-  }
+  const promise = (async () => {
+    try {
+      const assetPath = path.join(__dirname, '../../../assets/images/roulette', filename);
+      return await loadImage(assetPath);
+    } catch (e) {
+      logger.error(`[WheelGenerator] Failed to load asset ${filename}: ${e.message}`);
+      return null; // Cache null to prevent repeated load attempts
+    }
+  })();
+
+  imageCache.set(filename, promise);
+  return promise;
 }
 
 // ==================== UTILITY FUNCTIONS ====================
@@ -182,19 +187,16 @@ function preCalculateSegments(players) {
   const numSegments = players.length;
   const segmentAngle = (2 * Math.PI) / numSegments;
 
-  return players.map((player, i) => {
+  return players.map((rawPlayer, i) => {
+    // Guard against non-object player entries (strings, nulls, etc.)
+    const player = (rawPlayer && typeof rawPlayer === 'object')
+      ? rawPlayer
+      : { name: String(rawPlayer ?? 'Unknown') };
+
     const startAngle = i * segmentAngle;
     const endAngle = (i + 1) * segmentAngle;
     const midAngle = startAngle + segmentAngle / 2;
     const color = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
-
-    // Pre-calculate text transform
-    const textX = Math.cos(midAngle) * WHEEL.textRadius;
-    const textY = Math.sin(midAngle) * WHEEL.textRadius;
-
-    // Determine if text needs flipping (on left side)
-    const angleDeg = (midAngle * 180 / Math.PI) % 360;
-    const needsFlip = angleDeg > 90 && angleDeg < 270;
 
     // Smart font sizing based on name length
     const nameLength = (player.displayName || player.name || 'Unknown').length;
@@ -210,10 +212,7 @@ function preCalculateSegments(players) {
       endAngle,
       midAngle,
       color,
-      textX,
-      textY,
       textAngle: midAngle,
-      needsFlip,
       fontSize,
       textColor: getTextColor(color),
       displayName: truncateText(player.displayName || player.name || 'Unknown'),
@@ -238,30 +237,59 @@ async function createStaticLayers() {
   const bgCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
   const bgCtx = bgCanvas.getContext('2d', { alpha: false });
 
+  // Pre-fill with background color (prevents transparent PNG pixels turning black)
+  bgCtx.fillStyle = '#1a1a2e';
+  bgCtx.fillRect(0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+
   if (bgImg) {
     bgCtx.drawImage(bgImg, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
-  } else {
-    bgCtx.fillStyle = '#1a1a2e';
-    bgCtx.fillRect(0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
   }
 
   // Create overlay layer (frame + center + pointer)
   const overlayCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
   const overlayCtx = overlayCanvas.getContext('2d', { alpha: true });
 
-  // Frame
+  // Frame (fallback: draw a circular border)
   if (frameImg) {
     overlayCtx.drawImage(frameImg, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+  } else {
+    // Fallback: draw a simple golden frame border
+    overlayCtx.strokeStyle = '#FFD700';
+    overlayCtx.lineWidth = 8;
+    overlayCtx.beginPath();
+    overlayCtx.arc(CANVAS.targetWidth / 2, CANVAS.targetHeight / 2, 220, 0, Math.PI * 2);
+    overlayCtx.stroke();
   }
 
-  // Center emblem
+  // Center emblem (fallback: draw a center circle)
   if (centerImg) {
     overlayCtx.drawImage(centerImg, CENTER_EMBLEM.x, CENTER_EMBLEM.y, CENTER_EMBLEM.width, CENTER_EMBLEM.height);
+  } else {
+    // Fallback: draw a simple center circle
+    overlayCtx.fillStyle = '#2a2a4a';
+    overlayCtx.strokeStyle = '#FFD700';
+    overlayCtx.lineWidth = 3;
+    overlayCtx.beginPath();
+    overlayCtx.arc(CANVAS.targetWidth / 2, CANVAS.targetHeight / 2, 50, 0, Math.PI * 2);
+    overlayCtx.fill();
+    overlayCtx.stroke();
   }
 
-  // Pointer (right-aligned, vertically centered)
+  // Pointer (fallback: draw a triangle arrow)
   if (pointerImg) {
     overlayCtx.drawImage(pointerImg, POINTER.x, POINTER.y, POINTER.width, POINTER.height);
+  } else {
+    // Fallback: draw a simple triangle pointer on the right side
+    overlayCtx.fillStyle = '#FFD700';
+    overlayCtx.strokeStyle = '#000000';
+    overlayCtx.lineWidth = 2;
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(CANVAS.targetWidth - 30, CANVAS.targetHeight / 2);
+    overlayCtx.lineTo(CANVAS.targetWidth - 5, CANVAS.targetHeight / 2 - 20);
+    overlayCtx.lineTo(CANVAS.targetWidth - 5, CANVAS.targetHeight / 2 + 20);
+    overlayCtx.closePath();
+    overlayCtx.fill();
+    overlayCtx.stroke();
   }
 
   return { bgCanvas, overlayCanvas };
@@ -278,7 +306,11 @@ function drawWheelSegments(ctx, segments, rotationAngle, highlightWinner = false
   ctx.rotate(rotationAngle * Math.PI / 180);
 
   segments.forEach((segment, i) => {
-    const { startAngle, endAngle, color, textAngle, needsFlip, fontSize, textColor, displayName } = segment;
+    const { startAngle, endAngle, color, textAngle, fontSize, textColor, displayName } = segment;
+
+    // Calculate needsFlip dynamically based on CURRENT angle (initial + rotation)
+    const currentAngleDeg = normalizeAngle((textAngle * 180 / Math.PI) + rotationAngle);
+    const needsFlip = currentAngleDeg > 90 && currentAngleDeg < 270;
 
     // Draw segment with gradient for depth
     ctx.beginPath();
@@ -357,12 +389,14 @@ function shadeColor(color, percent) {
 
 /**
  * Draw wheel with motion blur for smooth appearance
+ * @param {number} speedDegPerSec - Angular velocity in degrees per second
  */
-function drawWheelWithBlur(wheelCtx, segments, angle, speed) {
+function drawWheelWithBlur(wheelCtx, segments, angle, speedDegPerSec) {
   wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
 
-  // Calculate blur based on speed
-  const blurAmount = Math.min(speed / 10, 1);
+  // Calculate blur based on speed (degrees per second)
+  // Blur starts at ~100 deg/sec, maxes out at ~500 deg/sec
+  const blurAmount = Math.min(speedDegPerSec / 500, 1);
 
   if (blurAmount > 0.1) {
     // Draw blurred trails
@@ -389,6 +423,14 @@ function drawWheelWithBlur(wheelCtx, segments, angle, speed) {
  * @returns {Promise<Buffer>} - GIF Buffer
  */
 export async function generateWheelGif(players, winnerIndex) {
+  // Input validation
+  if (!Array.isArray(players) || players.length === 0) {
+    throw new Error('[WheelGenerator] players must be a non-empty array');
+  }
+  if (typeof winnerIndex !== 'number' || winnerIndex < 0 || winnerIndex >= players.length) {
+    throw new Error(`[WheelGenerator] winnerIndex must be between 0 and ${players.length - 1}, got: ${winnerIndex}`);
+  }
+
   // Pre-calculate all segment data
   const segments = preCalculateSegments(players);
 
@@ -398,9 +440,9 @@ export async function generateWheelGif(players, winnerIndex) {
   // Setup encoder
   const encoder = new GIFEncoder(CANVAS.targetWidth, CANVAS.targetHeight);
   encoder.start();
-  encoder.setRepeat(0);
+  encoder.setRepeat(-1); // -1 = no repeat (play once)
   encoder.setQuality(1); // Best quality
-  encoder.setTransparent(0x00000000);
+  // Note: Removed setTransparent(0x00000000) - it was making black strokes/borders transparent
 
   // High-res wheel canvas (2x supersampled)
   const wheelCanvas = createCanvas(CANVAS.width, CANVAS.height);
@@ -419,11 +461,18 @@ export async function generateWheelGif(players, winnerIndex) {
   const segmentAngle = 360 / numSegments;
   const winnerCenterAngle = (winnerIndex + 0.5) * segmentAngle;
 
-  // Target: pointer at top (0°) pointing at winner
-  const finalAngle = 360 - winnerCenterAngle;
+  // Pointer is on the right side (canvas 0° = 3 o'clock position)
+  const pointerAngle = 0;
 
-  // Total spin distance (multiple full rotations + final position)
-  const totalSpin = (ANIMATION.totalSpins * 360) + finalAngle;
+  // Account for fractional spins (e.g., 3.5 spins adds 180° offset)
+  const spins = ANIMATION.totalSpins;
+  const fractionalOffset = (spins - Math.floor(spins)) * 360;
+
+  // Calculate final angle: where the wheel should stop so winner aligns with pointer
+  const finalAngle = normalizeAngle(pointerAngle - winnerCenterAngle - fractionalOffset);
+
+  // Total spin distance (full rotations + final position)
+  const totalSpin = spins * 360 + finalAngle;
 
   // Calculate frame timing
   const totalSpinFrames = Math.floor(ANIMATION.duration * ANIMATION.baseFps);
@@ -457,8 +506,13 @@ export async function generateWheelGif(players, winnerIndex) {
     const easedProgress = easeOutFriction(t);
     currentAngle = easedProgress * totalSpin;
 
-    // Calculate current speed for motion blur
-    const speed = i > 0 ? Math.abs(currentAngle - (easeOutFriction((i - 1) / totalSpinFrames) * totalSpin)) : 10;
+    // Variable frame delay (faster during speed, slower during reveal)
+    const delay = t < 0.3 ? 35 : (t < 0.7 ? 45 : 55);
+    const dt = delay / 1000; // Convert to seconds
+
+    // Calculate current speed in degrees per SECOND for consistent motion blur
+    const deltaAngle = i > 0 ? Math.abs(currentAngle - (easeOutFriction((i - 1) / totalSpinFrames) * totalSpin)) : 10;
+    const speedDegPerSec = deltaAngle / dt;
 
     // Segment ticking effect near the end
     const tickThreshold = 0.85;
@@ -478,20 +532,28 @@ export async function generateWheelGif(players, winnerIndex) {
     // Composite frame
     finalCtx.drawImage(bgCanvas, 0, 0);
 
-    // Draw wheel with motion blur
-    drawWheelWithBlur(wheelCtx, segments, displayAngle, speed);
+    // Draw wheel with motion blur (using degrees per second for consistent blur)
+    drawWheelWithBlur(wheelCtx, segments, displayAngle, speedDegPerSec);
     finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
 
     finalCtx.drawImage(overlayCanvas, 0, 0);
 
-    // Variable frame delay (faster during speed, slower during reveal)
-    const delay = t < 0.3 ? 35 : (t < 0.7 ? 45 : 55);
     encoder.setDelay(delay);
     encoder.addFrame(finalCtx);
 
     // Yield every 5 frames
     if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
+
+  // ===== EXACT LANDING FRAME (prevents visual jump into celebration) =====
+  const normalizedFinalAngle = normalizeAngle(totalSpin);
+  finalCtx.drawImage(bgCanvas, 0, 0);
+  wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
+  drawWheelSegments(wheelCtx, segments, normalizedFinalAngle, false, -1);
+  finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+  finalCtx.drawImage(overlayCanvas, 0, 0);
+  encoder.setDelay(60);
+  encoder.addFrame(finalCtx);
 
   // ===== CELEBRATION PHASE (Winner Highlight) =====
   for (let i = 0; i < ANIMATION.celebrationFrames; i++) {
@@ -501,7 +563,7 @@ export async function generateWheelGif(players, winnerIndex) {
     const pulse = i % 10 < 5;
 
     wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
-    drawWheelSegments(wheelCtx, segments, finalAngle, pulse, winnerIndex);
+    drawWheelSegments(wheelCtx, segments, normalizedFinalAngle, pulse, winnerIndex);
     finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
 
     finalCtx.drawImage(overlayCanvas, 0, 0);

@@ -127,16 +127,12 @@ export function createChosenEmbed(player, roundNumber) {
 /**
  * Create kick selection embed
  */
-export function createKickSelectionEmbed(kickerPlayer, targetPlayers, hasDoubleKick = false) {
+export function createKickSelectionEmbed(kickerPlayer, targetPlayers) {
   const targetsList = targetPlayers
     .map(p => `${NUMBER_EMOJIS[p.slot] || p.slot} ${p.displayName}`)
     .join('\n');
 
-  let description = `<@${kickerPlayer.userId}> اختر لاعباً لطرده:\n\n${targetsList}`;
-
-  if (hasDoubleKick) {
-    description += '\n\n🔥 **طرد مرتين نشط!** اختر اللاعب الثاني.';
-  }
+  const description = `<@${kickerPlayer.userId}> اختر لاعباً لطرده:\n\n${targetsList}`;
 
   return new EmbedBuilder()
     .setTitle('⚔️ اختر ضحيتك')

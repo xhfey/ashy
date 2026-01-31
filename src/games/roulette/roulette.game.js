@@ -104,13 +104,23 @@ export async function startRouletteGame(session, channel) {
     logger.info(`[Roulette] Starting game: ${session.id}`);
 
     // Initialize players with alive status
-    const players = session.players.map(p => ({
-      userId: p.userId,
-      displayName: p.displayName,
-      alive: true,
-      perks: p.perks || [],
-      slot: p.slot || p.slotNumber,
-    }));
+    const players = session.players.map((p, index) => {
+      const slot = p.slot ?? p.slotNumber ?? (index + 1);
+      return {
+        userId: p.userId,
+        displayName: p.displayName || 'Unknown',
+        alive: true,
+        perks: p.perks || [],
+        slot,
+      };
+    });
+
+    // Validate all players have required fields
+    for (const p of players) {
+      if (!p.userId) {
+        throw new Error(`[Roulette] Player missing userId`);
+      }
+    }
 
     // Initialize game state
     const gameState = {
@@ -214,6 +224,13 @@ async function runSpinRound(gameState, session) {
  * Start the kick selection phase
  */
 async function startKickSelection(gameState, session, kickerPlayer) {
+  // Verify kicker is still alive (defensive check)
+  if (!kickerPlayer || !kickerPlayer.alive) {
+    logger.warn(`[Roulette] Kicker is not alive, skipping to next spin`);
+    await runSpinRound(gameState, session);
+    return;
+  }
+
   gameState.phase = 'KICK_SELECTION';
   gameState.currentKickerId = kickerPlayer.userId;
   gameState.doubleKickActive = false;
@@ -227,7 +244,7 @@ async function startKickSelection(gameState, session, kickerPlayer) {
   const { canBuy } = await PerksLogic.canBuyDoubleKick(kickerPlayer.userId);
 
   // Update session for ButtonRouter phase tracking
-  session.phase = gameState.currentRound;
+  session.phase = 'KICK_SELECTION';
   await sessionManager.save(session);
 
   // Create kick selection embed and buttons
@@ -287,6 +304,10 @@ async function handleKickTarget(ctx, gameState, targetId) {
   }
 
   const kicker = gameState.players.find(p => p.userId === player.id);
+  if (!kicker) {
+    logger.error(`[Roulette] Kicker not found in game state: ${player.id}`);
+    return;
+  }
 
   // Process kick with perk logic
   const kickResult = PerksLogic.processKick(gameState.players, player.id, targetId);
@@ -356,7 +377,10 @@ async function handleKickTarget(ctx, gameState, targetId) {
  * Prompt for second kick (double kick perk)
  */
 async function promptSecondKick(gameState, session, kicker, firstTarget) {
-  const alivePlayers = gameState.players.filter(p => p.alive && p.userId !== kicker.userId);
+  // Filter out kicker AND the first target (can't kick same player twice)
+  const alivePlayers = gameState.players.filter(p =>
+    p.alive && p.userId !== kicker.userId && p.userId !== firstTarget.userId
+  );
 
   if (alivePlayers.length === 0) {
     // No more targets, continue game
@@ -413,7 +437,17 @@ async function handleSecondKick(ctx, gameState, targetId) {
     return;
   }
 
+  // Prevent kicking the same player twice with double kick
+  if (gameState.doubleKickFirstTarget === targetId) {
+    await interaction.followUp({ content: '❌ لا يمكنك طرد نفس اللاعب مرتين!', ephemeral: true });
+    return;
+  }
+
   const kicker = gameState.players.find(p => p.userId === player.id);
+  if (!kicker) {
+    logger.error(`[Roulette] Kicker not found in game state for second kick: ${player.id}`);
+    return;
+  }
 
   // Process second kick with perk logic
   const kickResult = PerksLogic.processKick(gameState.players, player.id, targetId);
