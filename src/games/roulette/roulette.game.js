@@ -337,8 +337,12 @@ async function startKickSelection(gameState, session, kickerPlayer) {
   });
 
   // Set timeout for kick selection
-  gameState.turnTimeout = setTimeout(async () => {
-    await handleKickTimeout(gameState, session, kickerPlayer);
+  gameState.turnTimeout = setTimeout(() => {
+    handleKickTimeout(gameState, session, kickerPlayer).catch(error => {
+      logger.error('[Roulette] Kick timeout error:', error);
+      // Cleanup on critical error
+      cleanupGame(session.id);
+    });
   }, TURN_TIMEOUT_MS);
 }
 
@@ -514,14 +518,14 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
   });
 
   // Set timeout for second kick
-  gameState.turnTimeout = setTimeout(async () => {
-    await withLock(session.id, async () => {
+  gameState.turnTimeout = setTimeout(() => {
+    withLock(session.id, async () => {
       // Skip second kick on timeout
       if (gameState.turnTimeout) {
         clearTimeout(gameState.turnTimeout);
         gameState.turnTimeout = null;
       }
-      
+
       gameState.doubleKickActive = false;
       gameState.doubleKickFirstTarget = null;
       gameState.currentKickerId = null;
@@ -530,6 +534,10 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
 
       await delay(RESULT_DELAY_MS);
       await runSpinRound(gameState, session);
+    }).catch(error => {
+      logger.error('[Roulette] Double kick timeout error:', error);
+      // Cleanup on critical error
+      cleanupGame(session.id);
     });
   }, TURN_TIMEOUT_MS);
 }
@@ -926,39 +934,53 @@ async function endGame(gameState, session, winner) {
     gameState.turnTimeout = null;
   }
 
+  let endReason = 'COMPLETED';
+
+  let rewardResult = null;
+
   try {
-    // Distribute rewards
-    const rewardResult = await awardGameWinners({
+    rewardResult = await awardGameWinners({
       gameType: 'ROULETTE',
       sessionId: gameState.sessionId,
       winnerIds: [winner.userId],
       playerCount: gameState.players.length,
       roundsPlayed: gameState.currentRound || 1
     });
-
-    const reward = rewardResult.reward;
-    const newBalance = rewardResult.results[0]?.newBalance
-      ?? await CurrencyService.getBalance(winner.userId);
-
-    // Send winner embed
-    const winEmbed = Embeds.createWinnerEmbed(winner, reward, newBalance);
-    const winButtons = Buttons.createWinnerButtons(newBalance, reward);
-
-    await gameState.channel.send({
-      content: `<@${winner.userId}>`,
-      embeds: [winEmbed],
-      components: winButtons,
-    });
-
-    // End session in DB
-    await SessionService.endSession(gameState.sessionId, winner.userId, 'COMPLETED');
-
-    logger.info(`[Roulette] Game ended: ${gameState.sessionId} - Winner: ${winner.displayName}`);
-    
-  } finally {
-    // FIX #26: ALWAYS cleanup, even if something above throws
-    cleanupGame(gameState.sessionId);
+  } catch (error) {
+    endReason = 'ERROR';
+    logger.error('[Roulette] Reward payout failed:', error);
   }
+
+  if (rewardResult) {
+    try {
+      const reward = rewardResult.reward;
+      const newBalance = rewardResult.results[0]?.newBalance
+        ?? await CurrencyService.getBalance(winner.userId);
+
+      // Send winner embed
+      const winEmbed = Embeds.createWinnerEmbed(winner, reward, newBalance);
+      const winButtons = Buttons.createWinnerButtons(newBalance, reward);
+
+      await gameState.channel.send({
+        content: `<@${winner.userId}>`,
+        embeds: [winEmbed],
+        components: winButtons,
+      });
+
+      logger.info(`[Roulette] Game ended: ${gameState.sessionId} - Winner: ${winner.displayName}`);
+    } catch (error) {
+      logger.error('[Roulette] Failed to announce winner:', error);
+    }
+  }
+
+  try {
+    await SessionService.endSession(gameState.sessionId, winner?.userId ?? null, endReason);
+  } catch (error) {
+    logger.error('[Roulette] Failed to end session:', error);
+  }
+
+  // FIX #26: ALWAYS cleanup, even if something above throws
+  cleanupGame(gameState.sessionId);
 }
 
 // ==================== CLEANUP ====================

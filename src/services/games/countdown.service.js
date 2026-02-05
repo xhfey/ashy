@@ -67,7 +67,9 @@ export function startCountdown(client, sessionId, message) {
               embeds: [],
               components: []
             });
-          } catch (e) {}
+          } catch (e) {
+            logger.warn('[Countdown] Failed to edit cancellation message:', e?.message || e);
+          }
           return;
         }
 
@@ -81,7 +83,9 @@ export function startCountdown(client, sessionId, message) {
               embeds: [],
               components: []
             });
-          } catch (e) {}
+          } catch (e) {
+            logger.warn('[Countdown] Failed to start game or edit message:', e?.message || e);
+          }
         }
         return;
       }
@@ -94,6 +98,7 @@ export function startCountdown(client, sessionId, message) {
         });
       } catch (e) {
         // Message deleted - cleanup
+        logger.debug('[Countdown] Message edit failed, cleaning up:', e?.message || e);
         stopCountdown(sessionId);
         await SessionService.cleanupSession(sessionId);
       }

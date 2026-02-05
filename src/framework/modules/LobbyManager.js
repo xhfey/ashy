@@ -258,7 +258,9 @@ class LobbyManager {
           embeds: [],
           components: []
         });
-      } catch (e) {}
+      } catch (e) {
+        logger.warn(`[LobbyManager] Failed to edit start message for ${session.id}:`, e?.message || e);
+      }
     }
 
     // Signal to game engine
@@ -291,7 +293,9 @@ class LobbyManager {
           embeds: [],
           components: []
         });
-      } catch (e) {}
+      } catch (e) {
+        logger.warn(`[LobbyManager] Failed to edit cancel message for ${session.id}:`, e?.message || e);
+      }
     }
 
     // Callback

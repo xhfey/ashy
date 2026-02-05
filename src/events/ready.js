@@ -64,7 +64,9 @@ async function recoverSessions(client) {
                   components: []
                 });
               }
-            } catch (e) {}
+            } catch (error) {
+              logger.warn(`[Ready] Failed to update message for session ${session.id}:`, error.message);
+            }
           } else if (session.messageId) {
             try {
               const channel = await client.channels.fetch(session.channelId);
@@ -74,7 +76,9 @@ async function recoverSessions(client) {
                 embeds: [],
                 components: []
               });
-            } catch (e) {}
+            } catch (error) {
+              logger.warn(`[Ready] Failed to update cancellation message for session ${session.id}:`, error.message);
+            }
           }
 
           if (startResult.error) {

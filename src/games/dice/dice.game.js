@@ -129,7 +129,9 @@ async function handleRollAgainFromCtx(ctx, gameState) {
     await interaction.message.edit({
       components: [buildDecisionButtons(gameState, 'ROLL', true)]
     });
-  } catch (e) {}
+  } catch (error) {
+    logger.warn('[Dice] Failed to update UI after roll:', error.message);
+  }
 
   await delay(DECISION_FEEDBACK_DELAY_MS);
   if (isGameCancelled(gameState)) return;
@@ -193,7 +195,9 @@ async function handleSkipFromCtx(ctx, gameState) {
     await interaction.message.edit({
       components: [buildDecisionButtons(gameState, 'SKIP', true)]
     });
-  } catch (e) {}
+  } catch (error) {
+    logger.warn('[Dice] Failed to update UI after skip:', error.message);
+  }
 
   await delay(DECISION_FEEDBACK_DELAY_MS);
   if (isGameCancelled(gameState)) return;
@@ -243,7 +247,9 @@ async function handleBlockTargetFromCtx(ctx, gameState, targetId) {
       content: `✅ ${MESSAGES.BLOCKED_PLAYER(`<@${target.userId}>`)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(currentPlayer.totalScore + turnScore)}`,
       components: [],
     });
-  } catch (e) {}
+  } catch (error) {
+    logger.warn('[Dice] Failed to update UI after block:', error.message);
+  }
 
   await applyBlock(gameState, currentPlayer, target, teamLetter, false, false);
 }
@@ -693,7 +699,9 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
             content: `⏱️ ${MESSAGES.TIMEOUT_AUTO_BLOCK}\n✅ ${MESSAGES.BLOCKED_PLAYER(`<@${randomTarget.userId}>`)}`,
             components: [],
           });
-        } catch (e) {}
+        } catch (error) {
+          logger.warn('[Dice] Failed to update message on auto-block:', error.message);
+        }
 
         await applyBlock(gameState, player, randomTarget, teamLetter, true, false);
       })().catch(error => {

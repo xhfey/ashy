@@ -49,7 +49,9 @@ export default {
         const channel = await interaction.client.channels.fetch(session.channelId);
         const message = await channel.messages.fetch(session.messageId);
         await message.edit({ content: '🚫 | تم إلغاء اللعبة', embeds: [], components: [] });
-      } catch (e) {}
+      } catch (e) {
+        logger.warn(`[Stop] Failed to edit game message for ${session.id}:`, e?.message || e);
+      }
     }
 
     await interaction.reply({ content: '✅ تم إلغاء اللعبة', ephemeral: true });

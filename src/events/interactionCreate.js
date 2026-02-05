@@ -77,6 +77,20 @@ function parseCustomId(customId) {
   };
 }
 
+async function safeReply(interaction, payload) {
+  if (interaction.deferred || interaction.replied) {
+    return interaction.followUp(payload);
+  }
+  return interaction.reply(payload);
+}
+
+async function safeUpdate(interaction, payload) {
+  if (interaction.deferred || interaction.replied) {
+    return interaction.editReply(payload);
+  }
+  return interaction.update(payload);
+}
+
 async function handleButton(interaction) {
   const customId = interaction.customId;
 
@@ -120,12 +134,17 @@ async function handleButton(interaction) {
     return interaction.deferUpdate().catch(() => {});
   }
 
+  // Defer FIRST before any async checks to prevent timeout
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.deferUpdate().catch(() => {});
+  }
+
   // Get session ONCE
   let session = null;
   if (sessionId) {
     session = await SessionService.getSession(sessionId);
     if (!session) {
-      return interaction.reply({ content: '❌ اللعبة انتهت', ephemeral: true });
+      return safeReply(interaction, { content: '❌ اللعبة انتهت', ephemeral: true });
     }
   }
 
@@ -152,12 +171,13 @@ async function handleButton(interaction) {
 }
 
 async function handleJoin(interaction, session, preferredSlot = null) {
-  if (session.status !== 'WAITING') {
-    return interaction.reply({ content: '❌ اللعبة بدأت!', ephemeral: true });
-  }
-
+  // Defer FIRST before any async checks to prevent timeout
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferUpdate().catch(() => {});
+  }
+
+  if (session.status !== 'WAITING') {
+    return interaction.followUp({ content: '❌ اللعبة بدأت!', ephemeral: true });
   }
 
   const result = await SessionService.joinSession({
@@ -186,12 +206,13 @@ async function handleJoin(interaction, session, preferredSlot = null) {
 }
 
 async function handleLeave(interaction, session) {
-  if (!session.players.some(p => p.userId === interaction.user.id)) {
-    return interaction.reply({ content: '❌ أنت لست في اللعبة!', ephemeral: true });
-  }
-
+  // Defer FIRST before any checks to prevent timeout
   if (!interaction.deferred && !interaction.replied) {
     await interaction.deferUpdate().catch(() => {});
+  }
+
+  if (!session.players.some(p => p.userId === interaction.user.id)) {
+    return interaction.followUp({ content: '❌ أنت لست في اللعبة!', ephemeral: true });
   }
 
   const result = await SessionService.leaveSession({
@@ -215,7 +236,7 @@ async function handleShop(interaction, session) {
   const player = session.players.find(p => p.userId === interaction.user.id);
   const ownedPerks = player?.perks || [];
 
-  return interaction.reply({
+  return safeReply(interaction, {
     embeds: [buildShopEmbed(session, balance, ownedPerks)],
     components: buildShopButtons(session, balance, ownedPerks),
     ephemeral: true
@@ -224,27 +245,27 @@ async function handleShop(interaction, session) {
 
 async function handlePerkBuy(interaction, session, perkId) {
   const perk = getPerk(session.gameType, perkId);
-  if (!perk) return interaction.reply({ content: '❌ ميزة غير متاحة', ephemeral: true });
+  if (!perk) return safeReply(interaction, { content: '❌ ميزة غير متاحة', ephemeral: true });
   if (perk.showInShop === false) {
-    return interaction.reply({
+    return safeReply(interaction, {
       content: '❌ هذه الميزة لا يمكن شراؤها من المتجر',
       ephemeral: true
     });
   }
 
   if (perk.canBuyDuringGame === false && session.status !== 'WAITING') {
-    return interaction.reply({
+    return safeReply(interaction, {
       content: '❌ هذه الميزة يمكن شراؤها فقط قبل بدء اللعبة',
       ephemeral: true
     });
   }
 
   const player = session.players.find(p => p.userId === interaction.user.id);
-  if (!player) return interaction.reply({ content: '❌ انضم أولاً!', ephemeral: true });
-  if (player.perks.includes(perkId)) return interaction.reply({ content: '❌ لديك هذه الميزة!', ephemeral: true });
+  if (!player) return safeReply(interaction, { content: '❌ انضم أولاً!', ephemeral: true });
+  if (player.perks.includes(perkId)) return safeReply(interaction, { content: '❌ لديك هذه الميزة!', ephemeral: true });
 
   const balance = await CurrencyService.getBalance(interaction.user.id);
-  if (balance < perk.price) return interaction.reply({ content: '❌ رصيدك غير كافٍ', ephemeral: true });
+  if (balance < perk.price) return safeReply(interaction, { content: '❌ رصيدك غير كافٍ', ephemeral: true });
 
   try {
     await CurrencyService.spendCoins(interaction.user.id, perk.price, 'PERK_PURCHASE', session.gameType, { sessionId: session.id, perkId });
@@ -253,12 +274,12 @@ async function handlePerkBuy(interaction, session, perkId) {
     const newBal = await CurrencyService.getBalance(interaction.user.id);
     const updatedPlayer = updatedSession.players.find(p => p.userId === interaction.user.id);
 
-    return interaction.update({
+    return safeUpdate(interaction, {
       embeds: [buildShopEmbed(updatedSession, newBal, updatedPlayer?.perks || [])],
       components: buildShopButtons(updatedSession, newBal, updatedPlayer?.perks || [])
     });
   } catch (e) {
     logger.error('Perk buy error:', e);
-    return interaction.reply({ content: '❌ خطأ', ephemeral: true });
+    return safeReply(interaction, { content: '❌ خطأ', ephemeral: true });
   }
 }

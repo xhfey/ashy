@@ -109,13 +109,16 @@ export async function awardGameWinners(payload = {}) {
   const pendingIds = ids.filter(id => !paidSet.has(id));
 
   if (session?.payoutDone) {
-    if (!ledger) {
-      logger.warn(`[Rewards] Missing reward ledger for completed payout: ${sessionId}`);
-      return { reward: 0, results: [], alreadyPaid: true };
+    // Verify ledger exists and is valid
+    if (!ledger || !Array.isArray(ledger?.paidIds)) {
+      logger.error(`[Rewards] Corrupted ledger for completed payout: ${sessionId}`);
+      return { reward: 0, results: [], error: 'CORRUPTED_LEDGER', alreadyPaid: true };
     }
     if (pendingIds.length === 0) {
       return { reward: ledger.reward, results: [], alreadyPaid: true };
     }
+    // If payoutDone but pendingIds exist, this indicates a retry after partial failure
+    logger.info(`[Rewards] Retrying payout for ${pendingIds.length} failed players: ${sessionId}`);
   }
 
   if (session && !session.payoutDone) {
