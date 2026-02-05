@@ -203,7 +203,7 @@
   - [x] Scoped tracking per interaction
   - [x] Aggregated stats and slow operation logging
   - [x] Auto-cleanup of abandoned timers
-- [x] `src/utils/cache.js` - Smart cache with TTL
+- [x] In-memory image caching and periodic cleanup added in game renderers
   - [x] LRU-like eviction when max size reached
   - [x] ImageCache with memory limit tracking
   - [x] Hit/miss rate statistics
@@ -314,7 +314,7 @@ _None currently_
 - [x] **Event Loop Blocking**: GIF/image generation now yields every 2 frames with `setImmediate`
 - [x] **Memory Leaks**: All imageCache Maps auto-clear every 6 hours
 - [x] **Unbounded Maps**: gameStates limited to 100 entries with 2h TTL
-- [x] **Missing Monitoring**: Performance tracking infrastructure added (`performance.js`, `cache.js`)
+- [x] **Missing Monitoring**: Performance tracking infrastructure added (`performance.js`)
 
 ---
 

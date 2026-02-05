@@ -7,7 +7,6 @@ import { randomInt } from 'crypto';
 import logger from '../../utils/logger.js';
 import * as CurrencyService from './currency.service.js';
 import { sessionManager } from '../../framework/index.js';
-import { WEEKLY_REWARDS } from '../../config/games.config.js';
 
 const BASE_REWARD_DEFAULT = 4;
 const BASE_REWARD_4P = 13;
@@ -199,14 +198,3 @@ export function calculateTournamentPrize(entryFee, playerCount, housePercent = 1
   const houseCut = Math.floor(totalPool * (housePercent / 100));
   return totalPool - houseCut;
 }
-
-/**
- * Get weekly reward for placement
- * @param {number} placement - 1, 2, or 3
- * @returns {number} - Reward amount
- */
-export function getWeeklyReward(placement) {
-  return WEEKLY_REWARDS[placement] || 0;
-}
-
-export { WEEKLY_REWARDS };

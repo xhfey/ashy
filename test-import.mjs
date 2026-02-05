@@ -1,5 +1,5 @@
 import { buttonRouter, codec } from './src/framework/index.js';
-import { getPublicPlayChoices } from './src/games/registry.js';
+import { getPublicPlayChoices } from './src/games/public-games.js';
 import { getFeatureFlagsSnapshot } from './src/config/feature-flags.config.js';
 
 console.log('Framework OK:', Boolean(buttonRouter), Boolean(codec));

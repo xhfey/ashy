@@ -79,6 +79,10 @@ See `CLAUDE.md` for complete documentation and `docs/lessons_learned.md` for dev
    - **Cause**: Network timeout or high CPU load.
    - **Fallback**: The bot will send a text-based "Spinning..." message automatically.
 
+4. **`canvas.node is not a valid Win32 application`**
+   - **Cause**: `node_modules` was installed in a different OS/runtime (e.g., WSL install, then running from PowerShell).
+   - **Fix**: Reinstall dependencies in the same shell/runtime you use to run the bot (`rm -rf node_modules package-lock.json && npm install`).
+
 ## 🎮 Commands
 
 | Command | Description |

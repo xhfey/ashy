@@ -1,9 +1,4 @@
 import { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder } from 'discord.js';
-import * as RedisService from '../../services/redis.service.js';
-import * as SessionService from '../../services/games/session.service.js';
-import * as CountdownService from '../../services/games/countdown.service.js';
-import { getFeatureFlagsSnapshot } from '../../config/feature-flags.config.js';
-import { getWeeklyResetStatus } from '../../services/economy/weekly-reset.service.js';
 import logger from '../../utils/logger.js';
 
 function formatMb(bytes) {
@@ -20,6 +15,20 @@ export default {
     await interaction.deferReply({ ephemeral: true });
 
     try {
+      const [
+        RedisService,
+        SessionService,
+        CountdownService,
+        featureFlagsModule,
+        weeklyResetModule,
+      ] = await Promise.all([
+        import('../../services/redis.service.js'),
+        import('../../services/games/session.service.js'),
+        import('../../services/games/countdown.service.js'),
+        import('../../config/feature-flags.config.js'),
+        import('../../services/economy/weekly-reset.service.js'),
+      ]);
+
       const [
         redisLatency,
         waitingSessions,
@@ -41,8 +50,8 @@ export default {
       }
       const countdownIds = CountdownService.getActiveCountdownIds();
       const mem = process.memoryUsage();
-      const weekly = getWeeklyResetStatus();
-      const flags = getFeatureFlagsSnapshot();
+      const weekly = weeklyResetModule.getWeeklyResetStatus();
+      const flags = featureFlagsModule.getFeatureFlagsSnapshot();
 
       const runtimeText = runtime.length
         ? runtime.map(r => `${r.gameId}: ${r.activeCount}`).join(' | ')

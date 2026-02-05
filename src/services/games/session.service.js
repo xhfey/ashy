@@ -438,21 +438,6 @@ export async function cleanupSession(sessionId) {
 }
 
 /**
- * Handle message deleted
- */
-export async function handleMessageDeleted(messageId) {
-  const session = await getSessionByMessage(messageId);
-
-  // Clean up regardless of status (WAITING or ACTIVE)
-  if (session) {
-    await cleanupSession(session.id);
-    return { sessionEnded: true, session };
-  }
-
-  return { sessionEnded: false };
-}
-
-/**
  * Force clear channel
  */
 export async function forceClearChannel(channelId) {

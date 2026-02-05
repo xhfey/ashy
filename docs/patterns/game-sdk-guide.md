@@ -289,74 +289,26 @@ const names = players.displayNames();
 const ids = players.userIds();
 ```
 
-### 4. Game Helpers (`utils/gameHelpers.js`)
+### 4. Core Utilities (`framework/*`, `utils/game-embeds.js`)
 
-**Validation Functions**:
-
-```javascript
-import {
-  requireActiveTurn,
-  requireAlivePlayers,
-  requireGamePhase,
-  requirePlayerInGame,
-  requirePlayerAlive
-} from '../../utils/gameHelpers.js';
-
-// Throws GameError if validation fails
-requireActiveTurn(player.id, gameState.currentPlayerId);
-requireAlivePlayers(players, 2);
-requireGamePhase(gameState.phase, 'PLAYING');
-```
-
-**Utility Functions**:
+**Recommended approach**:
 
 ```javascript
-import {
-  delay,
-  randomInt,
-  randomPick,
-  shuffle,
-  getAlivePlayers,
-  findPlayer,
-  hasActivePerk,
-  consumePerk
-} from '../../utils/gameHelpers.js';
+import { randomInt } from 'crypto';
+import { sessionManager } from '../../framework/index.js';
+import { buildCancelledMessage } from '../../utils/game-embeds.js';
 
-await delay(1000);
+// RNG
 const roll = randomInt(1, 7); // 1-6
-const winner = randomPick(players);
-shuffle(deck);
+
+// Session persistence + uiVersion/phase handling
+await sessionManager.commit(session);
+
+// Shared lobby/cancel messaging
+const text = buildCancelledMessage('NOT_ENOUGH_PLAYERS', 2);
 ```
 
-### 5. Embed Helpers (`utils/embedHelpers.js`)
-
-**Standard Embeds**:
-
-```javascript
-import {
-  createGameEmbed,
-  createWinnerEmbed,
-  createEliminationEmbed,
-  createRoundEmbed,
-  createErrorEmbed,
-  COLORS
-} from '../../utils/embedHelpers.js';
-
-// Base game embed
-const embed = createGameEmbed('عنوان', 'وصف', COLORS.GAME);
-
-// Winner announcement
-const embed = createWinnerEmbed(winner, 50, 1000);
-
-// Elimination
-const embed = createEliminationEmbed(player, 'kicked');
-
-// Round announcement
-const embed = createRoundEmbed(3, 5);
-
-// Error
-const embed = createErrorEmbed('حدث خطأ!');
-```
+Use `BaseGame`, `PlayerManager`, `TimeoutManager`, and `sessionManager` for runtime flow.
 
 ---
 
@@ -479,22 +431,20 @@ class MyGame extends BaseGame {
 ```javascript
 // mygame.embeds.js
 
-import { createGameEmbed, COLORS } from '../../utils/embedHelpers.js';
+import { EmbedBuilder } from 'discord.js';
 
 export function createRoundEmbed(roundNumber) {
-  return createGameEmbed(
-    '🎮 جولة جديدة',
-    `**الجولة ${roundNumber}**`,
-    COLORS.GAME
-  );
+  return new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('🎮 جولة جديدة')
+    .setDescription(`**الجولة ${roundNumber}**`);
 }
 
 export function createTurnEmbed(player, timeRemaining) {
-  return createGameEmbed(
-    '▶️ دورك!',
-    `<@${player.userId}>\n⏱️ ${timeRemaining} ثانية`,
-    COLORS.PRIMARY
-  );
+  return new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('▶️ دورك!')
+    .setDescription(`<@${player.userId}>\n⏱️ ${timeRemaining} ثانية`);
 }
 ```
 

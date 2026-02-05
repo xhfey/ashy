@@ -117,7 +117,7 @@ export class GameSession {
 import { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { GameSession } from './GameSession.js';
 import { createLobbyEmbed, createGameEmbed, createEndEmbed } from './embeds.js';
-import strings from '../../../localization/ar.json' assert { type: 'json' };
+import strings from '../../../localization/ar.json' with { type: 'json' };
 import logger from '../../../utils/logger.js';
 
 export default {
@@ -235,7 +235,7 @@ export default {
 
 ```javascript
 import { EmbedBuilder } from 'discord.js';
-import strings from '../../../localization/ar.json' assert { type: 'json' };
+import strings from '../../../localization/ar.json' with { type: 'json' };
 
 const s = strings.games.gameName;
 

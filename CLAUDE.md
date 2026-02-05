@@ -52,11 +52,12 @@ See [.env.example](file:///c:/Users/Prese/Desktop/Ash%20bot/.env.example) for al
 ## Project Overview
 
 **Ashy Bot** is an Arabic Discord gaming bot with:
-- 11 multiplayer games
+- `/play` as the public game hub entry point
+- Fully implemented games: Dice + Roulette
+- Hidden/unimplemented games kept off public launcher until ready
 - Virtual currency (عملات آشي / Ashy Coins)
 - Weekly leaderboards with prizes
 - Anti-abuse/fraud detection
-- Tournament system
 
 ## Tech Stack
 
@@ -102,32 +103,28 @@ await prisma.user.update({ ... });
 await prisma.user.update({ ... });
 ```
 
-### 3. Error Handling - Use Centralized Wrapper
+### 3. Error Handling - Keep It Local and Explicit
 
-Use `wrapCommand()` from `src/utils/commandWrapper.js`:
+Use command-local validation with clear user replies and logger-backed diagnostics:
 
 ```javascript
-import { wrapCommand, Errors } from '../../utils/commandWrapper.js';
+import logger from '../../utils/logger.js';
 
-// ✅ CORRECT - Clean, no try-catch needed
-export default wrapCommand({
-  data: new SlashCommandBuilder()...
-  
+export default {
+  data: new SlashCommandBuilder(),
+
   async execute(interaction) {
-    // Throw typed errors for user-friendly messages
-    if (balance < amount) {
-      throw new Errors.InsufficientBalanceError(amount, balance);
+    try {
+      // ... command logic
+    } catch (error) {
+      logger.error('[MyCommand] Execute failed:', error);
+      await interaction.reply({
+        content: '❌ حدث خطأ غير متوقع',
+        ephemeral: true
+      });
     }
-    // ... your logic
   }
-});
-
-// Available error types:
-// - Errors.InsufficientBalanceError(needed, have)
-// - Errors.CooldownError(remainingSeconds)
-// - Errors.PermissionError()
-// - Errors.GameError('ALREADY_IN_GAME' | 'GAME_FULL' | etc.)
-// - Errors.ValidationError(message, userMessage)
+};
 ```
 
 ### 4. Game Sessions
@@ -167,11 +164,10 @@ data: localizeCommand(
 ```javascript
 // src/commands/games/example/index.js
 import { SlashCommandBuilder } from 'discord.js';
-import { wrapCommand } from '../../../utils/commandWrapper.js';
 import { localizeCommand } from '../../../utils/localization.js';
-import strings from '../../../localization/ar.json' assert { type: 'json' };
+import strings from '../../../localization/ar.json' with { type: 'json' };
 
-export default wrapCommand({
+export default {
   data: localizeCommand(
     new SlashCommandBuilder(),
     { ar: 'اسم-الأمر', en: 'command-name' },
@@ -179,15 +175,18 @@ export default wrapCommand({
   ),
 
   async execute(interaction) {
-    // No try-catch needed - wrapCommand handles errors
-    await interaction.reply('...');
+    try {
+      await interaction.reply('...');
+    } catch (error) {
+      await interaction.reply({ content: strings.common.error, ephemeral: true });
+    }
   },
 
   // Optional: Handle button clicks
   async handleButton(interaction, sessionId, action) {
-    // Also automatically wrapped with error handling
+    // Handle button action for this command/module
   }
-});
+};
 ```
 
 ## Testing
@@ -237,19 +236,19 @@ Located in `src/services/economy/` and `src/middleware/`:
 
 ## Games List & Status
 
-| # | Command | Arabic Name | Players | Status |
-|---|---------|-------------|---------|--------|
-| 1 | /حجر-ورقة-مقص | حجر ورقة مقص | 2-20 | ⬜ Not Started |
-| 2 | /نرد | نرد | 2-10 | ✅ Complete |
-| 3 | /روليت | روليت | 4-20 | ✅ Complete |
-| 4 | /اكس-او | إكس أو | 2-6 | ⬜ Not Started |
-| 5 | /كراسي | كراسي | 4-20 | ⬜ Not Started |
-| 6 | /مافيا | مافيا | 5-20 | ⬜ Not Started |
-| 7 | /الغميضة | الغميضة | 4-20 | ⬜ Not Started |
-| 8 | /نسخة | نسخة | 4-10 | ⬜ Not Started |
-| 9 | /خمن-الدولة | خمن الدولة | 2-8 | ⬜ Not Started |
-| 10 | /اكس-او-ساخن | إكس أو ساخن | 2-6 | ⬜ Not Started |
-| 11 | /عجلة-الموت | عجلة الموت | 3-4 | ⬜ Not Started |
+| Game Type | Public via `/play` | Players | Status |
+|-----------|---------------------|---------|--------|
+| DICE | ✅ | 2-10 | ✅ Complete |
+| ROULETTE | ✅ | 4-20 | ✅ Complete |
+| RPS | ❌ | 2-20 | ⬜ Not Started |
+| XO | ❌ | 2-6 | ⬜ Not Started |
+| CHAIRS | ❌ | 4-20 | ⬜ Not Started |
+| MAFIA | ❌ | 5-20 | ⬜ Not Started |
+| HIDESEEK | ❌ | 4-20 | ⬜ Not Started |
+| REPLICA | ❌ | 4-10 | ⬜ Not Started |
+| GUESS_COUNTRY | ❌ | 2-8 | ⬜ Not Started |
+| HOT_XO | ❌ | 2-6 | ⬜ Not Started |
+| DEATH_WHEEL | ❌ | 3-4 | ⬜ Not Started |
 
 ## Perks System
 
@@ -273,7 +272,6 @@ Located in `src/services/economy/` and `src/middleware/`:
 2. Only work on current phase tasks
 3. Follow patterns in existing code
 4. Use Arabic for all user text
-5. Use `wrapCommand()` for error handling
+5. Keep command errors explicit with logger + user-friendly replies
 6. Update ROADMAP.md when done
 7. Update this status table if adding games
-

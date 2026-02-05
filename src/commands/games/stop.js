@@ -12,18 +12,21 @@ export default {
     .setDescription('إلغاء اللعبة الحالية (المنشئ فقط)'),
 
   async execute(interaction) {
-    const [
-      { cancelChannelEverywhere, cancelSessionEverywhere },
-      { findRuntimeGameByChannel },
-    ] = await Promise.all([
+    const [{ cancelChannelEverywhere, cancelSessionEverywhere }, gameRunner] = await Promise.all([
       import('../../services/games/cancellation.service.js'),
-      import('../../services/games/game-runner.service.js'),
+      import('../../services/games/game-runner.service.js').catch((error) => {
+        logger.warn('[Stop] Runtime inspector unavailable:', error?.message || error);
+        return null;
+      }),
     ]);
+    const findRuntimeGameByChannel = gameRunner?.findRuntimeGameByChannel;
 
     const session = await SessionService.getSessionByChannel(interaction.channelId);
 
     if (!session) {
-      const runtime = findRuntimeGameByChannel(interaction.channelId);
+      const runtime = typeof findRuntimeGameByChannel === 'function'
+        ? findRuntimeGameByChannel(interaction.channelId)
+        : null;
       if (!runtime) {
         return interaction.reply({ content: '❌ لا توجد لعبة في هذه القناة', ephemeral: true });
       }

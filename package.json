@@ -1,7 +1,7 @@
 {
   "name": "ashy-bot",
   "version": "0.1.0",
-  "description": "Arabic Discord gaming bot with 11 multiplayer games and economy system",
+  "description": "Arabic Discord gaming bot with a /play hub, Dice/Roulette, and economy system",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
