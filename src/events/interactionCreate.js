@@ -50,6 +50,11 @@ export default {
     }
 
     if (interaction.isStringSelectMenu()) {
+      if (interaction.customId.startsWith('v1:')) {
+        const handled = await buttonRouter.handleInteraction(interaction);
+        if (handled) return;
+      }
+
       if (interaction.customId === 'leaderboard_select') {
         const cmd = interaction.client.commands.get('لوحة-الصدارة');
         if (cmd?.handleSelectMenu) await cmd.handleSelectMenu(interaction);

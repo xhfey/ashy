@@ -9,7 +9,6 @@ import {
   SECOND_ROLL_OUTCOMES,
   SECOND_ROLL_NORMAL_CHANCE,
   SECOND_ROLL_SPECIAL_OUTCOMES,
-  NORMAL_ROLL_WEIGHTS,
   BETTER_LUCK_WEIGHTS,
 } from './dice.constants.js';
 
@@ -80,7 +79,7 @@ export function performSecondRoll(firstRoll, hasBetterLuck = false) {
     case SECOND_ROLL_OUTCOMES.MINUS_2:
       return {
         type: 'MODIFIER',
-        value: firstRoll - 2,
+        value: Math.max(0, firstRoll - 2),
         modifier: -2,
         display: '-2',
       };
@@ -88,7 +87,7 @@ export function performSecondRoll(firstRoll, hasBetterLuck = false) {
     case SECOND_ROLL_OUTCOMES.MINUS_4:
       return {
         type: 'MODIFIER',
-        value: firstRoll - 4,
+        value: Math.max(0, firstRoll - 4),
         modifier: -4,
         display: '-4',
       };

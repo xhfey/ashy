@@ -1,6 +1,10 @@
 /**
  * Roulette Game Constants
  * All game settings, perks, embeds, and visual constants
+ *
+ * BUGS FIXED:
+ * - #28: TURN_TIMEOUT_MS now derives from GAME_SETTINGS.kickTimeout
+ * - #30: NUMBER_EMOJIS for 11+ now use cleaner format
  */
 
 // ==================== GAME SETTINGS ====================
@@ -11,8 +15,15 @@ export const GAME_SETTINGS = {
   maxSlots: 20,
   lobbyTimeout: 30,    // 30 seconds countdown
   kickTimeout: 15,     // 15 seconds to pick target
-  baseReward: 12,      // coins for winner
+  baseReward: 4,       // legacy (rewards are centralized)
 };
+
+// ==================== TIMEOUT CONSTANTS ====================
+// FIX #28: Derive from GAME_SETTINGS to prevent sync issues
+
+export const TURN_TIMEOUT_MS = GAME_SETTINGS.kickTimeout * 1000;
+export const RESULT_DELAY_MS = 2000;     // 2 seconds before next turn
+export const CELEBRATION_DELAY_MS = 1500; // 1.5 seconds for celebration
 
 // ==================== PERKS ====================
 
@@ -63,6 +74,7 @@ export const EMBED_COLORS = {
 };
 
 // ==================== NUMBER EMOJIS ====================
+// FIX #30: Use cleaner format for numbers 11+
 
 export const NUMBER_EMOJIS = {
   1: '1️⃣',
@@ -75,17 +87,28 @@ export const NUMBER_EMOJIS = {
   8: '8️⃣',
   9: '9️⃣',
   10: '🔟',
-  11: '1️⃣1️⃣',
-  12: '1️⃣2️⃣',
-  13: '1️⃣3️⃣',
-  14: '1️⃣4️⃣',
-  15: '1️⃣5️⃣',
-  16: '1️⃣6️⃣',
-  17: '1️⃣7️⃣',
-  18: '1️⃣8️⃣',
-  19: '1️⃣9️⃣',
-  20: '2️⃣0️⃣',
+  // FIX #30: Use circled numbers or simple text for 11+
+  // These render better than compound emojis
+  11: '⑪',
+  12: '⑫',
+  13: '⑬',
+  14: '⑭',
+  15: '⑮',
+  16: '⑯',
+  17: '⑰',
+  18: '⑱',
+  19: '⑲',
+  20: '⑳',
 };
+
+/**
+ * Get number emoji with fallback
+ * @param {number} num - The number to get emoji for
+ * @returns {string} - The emoji or formatted number
+ */
+export function getNumberEmoji(num) {
+  return NUMBER_EMOJIS[num] || `[${num}]`;
+}
 
 // ==================== MESSAGES ====================
 
@@ -119,6 +142,7 @@ export const MESSAGES = {
   NO_SLOTS_AVAILABLE: 'لا توجد أرقام متاحة',
   GAME_STARTED: 'اللعبة بدأت بالفعل',
   CANNOT_LEAVE: 'لا يمكنك المغادرة بعد بدء اللعبة',
+  NO_TARGETS: 'لا يوجد لاعبين للطرد',
 
   // Timeouts
   TURN_TIMEOUT: '⏰ انتهى الوقت! سيتم إقصاء اللاعب تلقائياً...',
@@ -141,13 +165,6 @@ export const MESSAGES = {
   NOT_ENOUGH_PLAYERS: 'عدد اللاعبين غير كافي',
   JOIN_TO_PLAY: 'انضم للعبة أولاً',
 };
-
-// ==================== TIMING ====================
-
-export const TURN_TIMEOUT_MS = 15000;    // 15 seconds per turn
-export const SPIN_ANIMATION_MS = 3500;   // 3.5 seconds for wheel animation
-export const RESULT_DELAY_MS = 2000;     // 2 seconds before next turn
-export const CELEBRATION_DELAY_MS = 1500; // 1.5 seconds for celebration
 
 // ==================== WHEEL COLORS ====================
 

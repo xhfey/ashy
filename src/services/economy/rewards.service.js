@@ -1,77 +1,185 @@
 /**
  * Reward calculation service
- * Matches Fizbo's actual reward rates (3-30 coins per win)
+ * Global reward rules for multiplayer games
  */
 
+import { randomInt } from 'crypto';
 import logger from '../../utils/logger.js';
+import * as CurrencyService from './currency.service.js';
+import { sessionManager } from '../../framework/index.js';
 
-/**
- * Base rewards per game type (before multipliers)
- * These are calibrated to produce 3-30 coin rewards
- */
-const BASE_REWARDS = {
-  RPS: 8,
-  DICE: 8,
-  ROULETTE: 12,
-  XO: 10,
-  CHAIRS: 10,
-  MAFIA: 15,
-  HIDESEEK: 12,
-  REPLICA: 10,
-  GUESS_COUNTRY: 8,
-  HOT_XO: 10,
-  DEATH_WHEEL: 12
-};
+const BASE_REWARD_DEFAULT = 4;
+const BASE_REWARD_4P = 13;
+const MAX_REWARD = 50;
+
+function getBaseReward(playerCount) {
+  return playerCount >= 4 ? BASE_REWARD_4P : BASE_REWARD_DEFAULT;
+}
+
+function clampReward(value, base) {
+  const rounded = Math.round(value);
+  return Math.max(base, Math.min(MAX_REWARD, rounded));
+}
+
+function randomFloat() {
+  return randomInt(1_000_000) / 1_000_000;
+}
 
 /**
  * Calculate reward for game win
- * Produces rewards in the 3-30 range like Fizbo
+ *
+ * Rules:
+ * - Base reward is 4 coins, or 13 coins when playerCount >= 4
+ * - Max reward is 50 coins
+ * - More players => higher chance to roll bigger rewards
  *
  * @param {Object} gameData
- * @param {string} gameData.gameType - Game type (RPS, DICE, etc.)
  * @param {number} gameData.playerCount - Number of players in game
- * @param {number} gameData.roundsPlayed - Number of rounds (optional)
- * @param {number} gameData.survivalRounds - Rounds survived in elimination games (optional)
  * @returns {Object} - { base: number, bonus: number, total: number }
  */
-export function calculateReward(gameData) {
-  const { gameType, playerCount = 2, roundsPlayed = 1, survivalRounds = 0 } = gameData;
+export function calculateReward(gameData = {}) {
+  const { playerCount = 2 } = gameData;
+  const safeCount = Math.max(1, Number(playerCount) || 0);
+  const base = getBaseReward(safeCount);
+  const max = MAX_REWARD;
 
-  // Get base reward for game type
-  let base = BASE_REWARDS[gameType] || 8;
+  const bias = Math.min(Math.max((safeCount - 2) / 8, 0), 1);
+  const exponent = 1 + bias * 2;
+  const u = randomFloat();
+  const scaled = 1 - Math.pow(u, exponent);
+  const reward = base + Math.floor(scaled * (max - base + 1));
+  const finalReward = clampReward(reward, base);
 
-  // Player count bonus: +1 per additional player (capped)
-  // 2 players = +0, 5 players = +3, 10 players = +8, 20 players = +10 (capped)
-  const playerBonus = Math.min(Math.floor((playerCount - 2) * 0.8), 10);
-  base += playerBonus;
-
-  // Duration/rounds bonus for longer games
-  // +1 per 2 rounds, capped at +5
-  const roundBonus = Math.min(Math.floor(roundsPlayed / 2), 5);
-  base += roundBonus;
-
-  // Survival bonus for elimination games (roulette, chairs, etc.)
-  // +1 per round survived, capped at +5
-  const survivalBonus = Math.min(survivalRounds, 5);
-  base += survivalBonus;
-
-  // Random bonus (adds excitement, prevents farming patterns)
-  // Range: 0 to 5
-  const randomBonus = Math.floor(Math.random() * 6);
-
-  // Calculate total
-  const total = base + randomBonus;
-
-  // Ensure within bounds (3-30)
-  const finalTotal = Math.max(3, Math.min(30, total));
-
-  logger.debug(`Reward calculated: ${gameType} - base:${base} + random:${randomBonus} = ${finalTotal}`);
+  logger.debug(`Reward calculated: count:${safeCount} base:${base} total:${finalReward}`);
 
   return {
-    base: base,
-    bonus: randomBonus,
-    total: finalTotal
+    base,
+    bonus: finalReward - base,
+    total: finalReward
   };
+}
+
+/**
+ * Award rewards to winners (no split, each winner gets full reward)
+ *
+ * @param {Object} payload
+ * @param {string} payload.gameType
+ * @param {string|null} payload.sessionId
+ * @param {string[]} payload.winnerIds
+ * @param {number} payload.playerCount
+ * @param {number} payload.roundsPlayed
+ * @param {number|null} payload.rewardOverride
+ * @returns {Promise<{reward: number, results: Array, alreadyPaid?: boolean}>}
+ */
+export async function awardGameWinners(payload = {}) {
+  const {
+    gameType,
+    sessionId = null,
+    winnerIds = [],
+    playerCount = 2,
+    roundsPlayed = 1,
+    rewardOverride = null
+  } = payload;
+
+  const ids = Array.isArray(winnerIds) ? winnerIds.filter(Boolean) : [];
+  if (ids.length === 0) {
+    return { reward: 0, results: [] };
+  }
+
+  const safeCount = Math.max(1, Number(playerCount) || 0);
+  const base = getBaseReward(safeCount);
+  const safeGameType = gameType || 'UNKNOWN';
+
+  let session = null;
+  let ledger = null;
+  if (sessionId) {
+    session = await sessionManager.load(sessionId);
+    ledger = session?.gameState?.rewardLedger || null;
+  }
+
+  let reward = Number.isFinite(ledger?.reward) ? ledger.reward : null;
+  if (!Number.isFinite(reward)) {
+    const overrideReward = Number.isFinite(rewardOverride) ? rewardOverride : null;
+    const computedReward = overrideReward ?? calculateReward({ playerCount: safeCount }).total;
+    reward = clampReward(computedReward, base);
+  }
+
+  const paidSet = new Set(Array.isArray(ledger?.paidIds) ? ledger.paidIds : []);
+  const failedSet = new Set(Array.isArray(ledger?.failedIds) ? ledger.failedIds : []);
+  const pendingIds = ids.filter(id => !paidSet.has(id));
+
+  if (session?.payoutDone) {
+    if (!ledger) {
+      logger.warn(`[Rewards] Missing reward ledger for completed payout: ${sessionId}`);
+      return { reward: 0, results: [], alreadyPaid: true };
+    }
+    if (pendingIds.length === 0) {
+      return { reward: ledger.reward, results: [], alreadyPaid: true };
+    }
+  }
+
+  if (session && !session.payoutDone) {
+    session.gameState = session.gameState || {};
+    session.gameState.rewardLedger = {
+      reward,
+      paidIds: Array.from(paidSet),
+      failedIds: pendingIds
+    };
+    session.payoutDone = true;
+    try {
+      await sessionManager.save(session);
+    } catch (error) {
+      logger.error('[Rewards] Failed to persist payout lock:', error);
+    }
+  }
+
+  if (pendingIds.length === 0) {
+    return { reward, results: [], alreadyPaid: true };
+  }
+
+  const results = [];
+  for (const userId of pendingIds) {
+    try {
+      const result = await CurrencyService.awardGameWin(
+        userId,
+        reward,
+        safeGameType,
+        { sessionId, playerCount: safeCount, roundsPlayed, reward }
+      );
+      results.push({
+        userId,
+        reward,
+        newBalance: result?.newBalance ?? null,
+        success: true
+      });
+      paidSet.add(userId);
+      failedSet.delete(userId);
+    } catch (error) {
+      logger.error(`[Rewards] Failed to award ${userId} in ${safeGameType}:`, error);
+      results.push({
+        userId,
+        reward,
+        newBalance: null,
+        success: false
+      });
+      failedSet.add(userId);
+    }
+  }
+
+  if (session) {
+    session.gameState = session.gameState || {};
+    session.gameState.rewardLedger = {
+      reward,
+      paidIds: Array.from(paidSet),
+      failedIds: Array.from(failedSet)
+    };
+    if (failedSet.size === 0) {
+      session.payoutDone = true;
+    }
+    await sessionManager.save(session);
+  }
+
+  return { reward, results, partial: failedSet.size > 0 };
 }
 
 /**
@@ -106,5 +214,3 @@ export const WEEKLY_REWARDS = {
 export function getWeeklyReward(placement) {
   return WEEKLY_REWARDS[placement] || 0;
 }
-
-export { BASE_REWARDS };

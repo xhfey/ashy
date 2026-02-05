@@ -10,19 +10,25 @@
  * - Advanced perk system (Shield, Extra Life, Double Kick)
  * - Stale-click protection via phase tracking
  * - Concurrency control via locks
+ *
+ * BUGS FIXED:
+ * - #22: Final round now properly handles perks
+ * - #24: Shop button added to lobby flow
+ * - #25: Timeout race condition fixed
+ * - #26: Memory leak prevented with try-finally
+ * - #27: Silent failures now give feedback
  */
 
 import { AttachmentBuilder } from 'discord.js';
 import { randomInt } from 'crypto';
 import * as SessionService from '../../services/games/session.service.js';
 import * as CurrencyService from '../../services/economy/currency.service.js';
+import { awardGameWinners } from '../../services/economy/rewards.service.js';
 import { buttonRouter, sessionManager } from '../../framework/index.js';
-import { GAMES } from '../../config/games.config.js';
-import { generateWheelGif } from './WheelGenerator.js';
+import { generateWheelGif, WHEEL_GIF_DURATION_MS } from './WheelGenerator.js';
 import {
   MESSAGES,
   TURN_TIMEOUT_MS,
-  SPIN_ANIMATION_MS,
   RESULT_DELAY_MS,
   GAME_SETTINGS,
   PERKS,
@@ -32,8 +38,46 @@ import * as Buttons from './roulette.buttons.js';
 import * as PerksLogic from './roulette.perks.js';
 import logger from '../../utils/logger.js';
 
+// ==================== UTILITY FUNCTIONS ====================
+
+/**
+ * Delay utility (defined at top for clarity)
+ */
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function getSelectValue(interaction) {
+  if (!interaction?.values || interaction.values.length === 0) return null;
+  return interaction.values[0];
+}
+
+// ==================== STATE MANAGEMENT ====================
+
 // Store active games (in-memory for timeouts and local state)
 const activeGames = new Map();
+
+// Simple concurrency locks per session (Enhancement #3)
+const sessionLocks = new Map();
+
+/**
+ * Execute function with session lock to prevent race conditions
+ */
+async function withLock(sessionId, fn) {
+  // Wait for any existing lock
+  while (sessionLocks.get(sessionId)) {
+    await delay(10);
+  }
+  
+  sessionLocks.set(sessionId, true);
+  try {
+    return await fn();
+  } finally {
+    sessionLocks.delete(sessionId);
+  }
+}
+
+// ==================== HANDLER REGISTRATION ====================
 
 /**
  * Register roulette handler with ButtonRouter
@@ -57,42 +101,65 @@ async function handleRouletteAction(ctx) {
     return; // Game not active
   }
 
-  switch (action) {
-    case 'kick':
-      await handleKickTarget(ctx, gameState, details);
-      break;
-    case 'kick2':
-      await handleSecondKick(ctx, gameState, details);
-      break;
-    case 'selfkick':
-      await handleSelfKick(ctx, gameState);
-      break;
-    case 'randomkick':
-      await handleRandomKick(ctx, gameState);
-      break;
-    case 'doublekick':
-      await handleDoubleKickPurchase(ctx, gameState);
-      break;
-    case 'skip_double':
-      await handleSkipDoubleKick(ctx, gameState);
-      break;
-    case 'shop':
-      await handleShop(ctx, gameState);
-      break;
-    case 'buy':
-      await handlePerkPurchase(ctx, gameState, details);
-      break;
-    case 'shop_close':
-      await interaction.update({
-        content: '✅ تم إغلاق المتجر',
-        embeds: [],
-        components: [],
-      });
-      break;
-    default:
-      logger.debug(`[Roulette] Unknown action: ${action}`);
-  }
+  // Use lock to prevent race conditions
+  await withLock(session.id, async () => {
+    switch (action) {
+      case 'kick':
+        await handleKickTarget(ctx, gameState, details);
+        break;
+      case 'kick_select': {
+        const targetId = getSelectValue(interaction);
+        if (!targetId) {
+          await interaction.followUp({ content: '❌ اختيار غير صالح', ephemeral: true });
+          break;
+        }
+        await handleKickTarget(ctx, gameState, targetId);
+        break;
+      }
+      case 'kick2':
+        await handleSecondKick(ctx, gameState, details);
+        break;
+      case 'kick2_select': {
+        const targetId = getSelectValue(interaction);
+        if (!targetId) {
+          await interaction.followUp({ content: '❌ اختيار غير صالح', ephemeral: true });
+          break;
+        }
+        await handleSecondKick(ctx, gameState, targetId);
+        break;
+      }
+      case 'selfkick':
+        await handleSelfKick(ctx, gameState);
+        break;
+      case 'randomkick':
+        await handleRandomKick(ctx, gameState);
+        break;
+      case 'doublekick':
+        await handleDoubleKickPurchase(ctx, gameState);
+        break;
+      case 'skip_double':
+        await handleSkipDoubleKick(ctx, gameState);
+        break;
+      case 'shop':
+        await handleShop(ctx, gameState);
+        break;
+      case 'buy':
+        await handlePerkPurchase(ctx, gameState, details);
+        break;
+      case 'shop_close':
+        await interaction.editReply({
+          content: '✅ تم إغلاق المتجر',
+          embeds: [],
+          components: [],
+        });
+        break;
+      default:
+        logger.debug(`[Roulette] Unknown action: ${action}`);
+    }
+  });
 }
+
+// ==================== GAME LIFECYCLE ====================
 
 /**
  * Start a new Roulette game
@@ -105,22 +172,22 @@ export async function startRouletteGame(session, channel) {
 
     // Initialize players with alive status
     const players = session.players.map((p, index) => {
+      // Validate userId exists
+      if (!p.userId) {
+        throw new Error(`[Roulette] Player at index ${index} missing userId`);
+      }
+      
+      // Default slot to index+1 if not provided
       const slot = p.slot ?? p.slotNumber ?? (index + 1);
+      
       return {
         userId: p.userId,
         displayName: p.displayName || 'Unknown',
         alive: true,
-        perks: p.perks || [],
+        perks: Array.isArray(p.perks) ? [...p.perks] : [],
         slot,
       };
     });
-
-    // Validate all players have required fields
-    for (const p of players) {
-      if (!p.userId) {
-        throw new Error(`[Roulette] Player missing userId`);
-      }
-    }
 
     // Initialize game state
     const gameState = {
@@ -128,7 +195,7 @@ export async function startRouletteGame(session, channel) {
       channel,
       players,
       currentRound: 0,
-      phase: 'PLAYING', // PLAYING, SPINNING, KICK_SELECTION, GAME_END
+      phase: 'PLAYING', // PLAYING, SPINNING, KICK_SELECTION, FINAL_ROUND, GAME_END
       turnTimeout: null,
       currentKickerId: null,
       doubleKickActive: false,
@@ -151,15 +218,22 @@ export async function startRouletteGame(session, channel) {
 
   } catch (error) {
     logger.error('[Roulette] Error starting game:', error);
+    // Cleanup on error
+    cleanupGame(session.id);
     throw error;
   }
 }
+
+// ==================== ROUND MANAGEMENT ====================
 
 /**
  * Run a single spin round
  */
 async function runSpinRound(gameState, session) {
   if (gameState.phase === 'GAME_END') return;
+
+  session.phase = 'SPINNING';
+  await sessionManager.save(session);
 
   // Get alive players
   const alivePlayers = gameState.players.filter(p => p.alive);
@@ -207,7 +281,7 @@ async function runSpinRound(gameState, session) {
   }
 
   // Wait for GIF animation
-  await delay(SPIN_ANIMATION_MS);
+  await delay(WHEEL_GIF_DURATION_MS);
 
   // Announce chosen player
   const chosenEmbed = Embeds.createChosenEmbed(chosenPlayer, gameState.currentRound);
@@ -224,9 +298,15 @@ async function runSpinRound(gameState, session) {
  * Start the kick selection phase
  */
 async function startKickSelection(gameState, session, kickerPlayer) {
-  // Verify kicker is still alive (defensive check)
-  if (!kickerPlayer || !kickerPlayer.alive) {
-    logger.warn(`[Roulette] Kicker is not alive, skipping to next spin`);
+  // FIX #19: Verify kicker is still alive (defensive check)
+  if (!kickerPlayer) {
+    logger.warn(`[Roulette] Kicker is null, skipping to next spin`);
+    await runSpinRound(gameState, session);
+    return;
+  }
+  
+  if (!kickerPlayer.alive) {
+    logger.warn(`[Roulette] Kicker ${kickerPlayer.userId} is not alive, skipping to next spin`);
     await runSpinRound(gameState, session);
     return;
   }
@@ -243,9 +323,9 @@ async function startKickSelection(gameState, session, kickerPlayer) {
   // Check if kicker can afford double kick
   const { canBuy } = await PerksLogic.canBuyDoubleKick(kickerPlayer.userId);
 
-  // Update session for ButtonRouter phase tracking
+  // Update session for ButtonRouter phase tracking (use string, not number!)
   session.phase = 'KICK_SELECTION';
-  await sessionManager.save(session);
+  await sessionManager.commit(session);
 
   // Create kick selection embed and buttons
   const kickEmbed = Embeds.createKickSelectionEmbed(kickerPlayer, targetPlayers);
@@ -262,21 +342,43 @@ async function startKickSelection(gameState, session, kickerPlayer) {
   }, TURN_TIMEOUT_MS);
 }
 
+// ==================== TIMEOUT HANDLING ====================
+
 /**
  * Handle kick timeout - kicker gets eliminated
+ * FIX #25: Race condition prevention
  */
 async function handleKickTimeout(gameState, session, kickerPlayer) {
-  if (gameState.phase !== 'KICK_SELECTION') return;
-  if (gameState.currentKickerId !== kickerPlayer.userId) return;
+  await withLock(session.id, async () => {
+    // FIX #25: Clear timeout FIRST to prevent any race conditions
+    if (gameState.turnTimeout) {
+      clearTimeout(gameState.turnTimeout);
+      gameState.turnTimeout = null;
+    }
+    
+    // Phase check
+    if (gameState.phase !== 'KICK_SELECTION') return;
+    if (gameState.currentKickerId !== kickerPlayer.userId) return;
 
-  gameState.turnTimeout = null;
+    // FIX #25: Check if kicker is still alive before eliminating
+    const kicker = gameState.players.find(p => p.userId === kickerPlayer.userId);
+    if (!kicker?.alive) {
+      logger.debug(`[Roulette] Timeout fired but kicker already eliminated`);
+      return;
+    }
 
-  // Timeout message
-  await gameState.channel.send({ content: MESSAGES.TURN_TIMEOUT });
+    // Invalidate current kick UI to prevent late clicks
+    await sessionManager.commit(session);
 
-  // Eliminate the kicker for not choosing
-  await eliminatePlayer(gameState, session, kickerPlayer.userId, 'timeout');
+    // Timeout message
+    await gameState.channel.send({ content: MESSAGES.TURN_TIMEOUT });
+
+    // Eliminate the kicker for not choosing
+    await eliminatePlayer(gameState, session, kickerPlayer.userId, 'timeout');
+  });
 }
+
+// ==================== KICK HANDLERS ====================
 
 /**
  * Handle kick target selection
@@ -303,11 +405,16 @@ async function handleKickTarget(ctx, gameState, targetId) {
     return;
   }
 
+  // FIX #16: Null check for kicker
   const kicker = gameState.players.find(p => p.userId === player.id);
   if (!kicker) {
     logger.error(`[Roulette] Kicker not found in game state: ${player.id}`);
+    await interaction.followUp({ content: '❌ خطأ في اللعبة', ephemeral: true });
     return;
   }
+
+  // Invalidate current kick UI to prevent duplicate clicks
+  await ctx.commit();
 
   // Process kick with perk logic
   const kickResult = PerksLogic.processKick(gameState.players, player.id, targetId);
@@ -329,6 +436,7 @@ async function handleKickTarget(ctx, gameState, targetId) {
 
       // Handle double kick if active
       if (gameState.doubleKickActive && !gameState.doubleKickFirstTarget) {
+        gameState.doubleKickFirstTarget = targetId; // Mark as "processed"
         await promptSecondKick(gameState, session, kicker, target);
         return;
       }
@@ -377,7 +485,7 @@ async function handleKickTarget(ctx, gameState, targetId) {
  * Prompt for second kick (double kick perk)
  */
 async function promptSecondKick(gameState, session, kicker, firstTarget) {
-  // Filter out kicker AND the first target (can't kick same player twice)
+  // FIX #17: Filter out kicker AND the first target (can't kick same player twice)
   const alivePlayers = gameState.players.filter(p =>
     p.alive && p.userId !== kicker.userId && p.userId !== firstTarget.userId
   );
@@ -392,6 +500,10 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
     return;
   }
 
+  gameState.phase = 'DOUBLE_KICK';
+  session.phase = 'DOUBLE_KICK';
+  await sessionManager.commit(session);
+
   // Show double kick prompt
   const doubleEmbed = Embeds.createDoubleKickPromptEmbed(kicker, firstTarget);
   const doubleButtons = Buttons.createDoubleKickButtons(session, alivePlayers);
@@ -403,14 +515,22 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
 
   // Set timeout for second kick
   gameState.turnTimeout = setTimeout(async () => {
-    // Skip second kick on timeout
-    gameState.doubleKickActive = false;
-    gameState.doubleKickFirstTarget = null;
-    gameState.currentKickerId = null;
-    gameState.turnTimeout = null;
+    await withLock(session.id, async () => {
+      // Skip second kick on timeout
+      if (gameState.turnTimeout) {
+        clearTimeout(gameState.turnTimeout);
+        gameState.turnTimeout = null;
+      }
+      
+      gameState.doubleKickActive = false;
+      gameState.doubleKickFirstTarget = null;
+      gameState.currentKickerId = null;
 
-    await delay(RESULT_DELAY_MS);
-    await runSpinRound(gameState, session);
+      await sessionManager.commit(session);
+
+      await delay(RESULT_DELAY_MS);
+      await runSpinRound(gameState, session);
+    });
   }, TURN_TIMEOUT_MS);
 }
 
@@ -437,7 +557,7 @@ async function handleSecondKick(ctx, gameState, targetId) {
     return;
   }
 
-  // Prevent kicking the same player twice with double kick
+  // FIX #17: Prevent kicking the same player twice with double kick (runtime check)
   if (gameState.doubleKickFirstTarget === targetId) {
     await interaction.followUp({ content: '❌ لا يمكنك طرد نفس اللاعب مرتين!', ephemeral: true });
     return;
@@ -446,8 +566,12 @@ async function handleSecondKick(ctx, gameState, targetId) {
   const kicker = gameState.players.find(p => p.userId === player.id);
   if (!kicker) {
     logger.error(`[Roulette] Kicker not found in game state for second kick: ${player.id}`);
+    await interaction.followUp({ content: '❌ خطأ في اللعبة', ephemeral: true });
     return;
   }
+
+  // Invalidate current double-kick UI
+  await ctx.commit();
 
   // Process second kick with perk logic
   const kickResult = PerksLogic.processKick(gameState.players, player.id, targetId);
@@ -494,25 +618,35 @@ async function handleSelfKick(ctx, gameState) {
     gameState.turnTimeout = null;
   }
 
+  await ctx.commit();
+
   await eliminatePlayer(gameState, session, player.id, 'self_kick');
 }
 
 /**
  * Handle random kick
+ * FIX #27: Add error feedback instead of silent failure
  */
 async function handleRandomKick(ctx, gameState) {
-  const { session, player } = ctx;
+  const { session, player, interaction } = ctx;
 
   if (gameState.currentKickerId !== player.id) {
+    // FIX #27: Give feedback instead of silent return
+    await interaction.followUp({ content: `❌ ${MESSAGES.NOT_YOUR_TURN}`, ephemeral: true });
     return;
   }
 
   const alivePlayers = gameState.players.filter(p => p.alive && p.userId !== player.id);
-  if (alivePlayers.length === 0) return;
+  if (alivePlayers.length === 0) {
+    await interaction.followUp({ content: '❌ لا يوجد لاعبين للطرد', ephemeral: true });
+    return;
+  }
 
   const randomTarget = alivePlayers[randomInt(alivePlayers.length)];
   await handleKickTarget(ctx, gameState, randomTarget.userId);
 }
+
+// ==================== PERK HANDLERS ====================
 
 /**
  * Handle double kick perk purchase during kick phase
@@ -522,6 +656,14 @@ async function handleDoubleKickPurchase(ctx, gameState) {
 
   if (gameState.currentKickerId !== player.id) {
     await interaction.followUp({ content: `❌ ${MESSAGES.NOT_YOUR_TURN}`, ephemeral: true });
+    return;
+  }
+
+  if (gameState.doubleKickActive || gameState.doubleKickFirstTarget) {
+    await interaction.followUp({
+      content: '❌ الطرد المزدوج مفعل بالفعل لهذا الدور',
+      ephemeral: true,
+    });
     return;
   }
 
@@ -569,6 +711,8 @@ async function handleSkipDoubleKick(ctx, gameState) {
     gameState.turnTimeout = null;
   }
 
+  await ctx.commit();
+
   gameState.doubleKickActive = false;
   gameState.doubleKickFirstTarget = null;
   gameState.currentKickerId = null;
@@ -579,6 +723,7 @@ async function handleSkipDoubleKick(ctx, gameState) {
 
 /**
  * Handle shop access
+ * FIX #24: Shop is now accessible
  */
 async function handleShop(ctx, gameState) {
   const { session, player, interaction } = ctx;
@@ -587,7 +732,7 @@ async function handleShop(ctx, gameState) {
   const ownedPerks = PerksLogic.getOwnedPerks(gameState.players, player.id);
   const balance = await CurrencyService.getBalance(player.id);
 
-  const shopEmbed = Embeds.createShopEmbed(player.id, ownedPerks, balance);
+  const shopEmbed = Embeds.createShopEmbed(ownedPerks, balance);
   const shopButtons = Buttons.createShopButtons(session, ownedPerks);
 
   await interaction.followUp({
@@ -640,6 +785,8 @@ async function handlePerkPurchase(ctx, gameState, perkId) {
   });
 }
 
+// ==================== ELIMINATION ====================
+
 /**
  * Eliminate a player and continue the game
  */
@@ -667,23 +814,32 @@ async function eliminatePlayer(gameState, session, userId, reason = 'kicked') {
 
 /**
  * Eliminate a player without continuing to next round
+ * @returns {boolean} - Whether elimination was successful
  */
 async function eliminatePlayerWithoutContinue(gameState, userId, reason = 'kicked') {
   const player = gameState.players.find(p => p.userId === userId);
-  if (!player) return;
+  if (!player) {
+    logger.warn(`[Roulette] Attempted to eliminate non-existent player: ${userId}`);
+    return false;
+  }
 
   player.alive = false;
 
   // Send elimination message
   const elimEmbed = Embeds.createEliminationEmbed(player, reason);
   await gameState.channel.send({ embeds: [elimEmbed] });
+  
+  return true;
 }
+
+// ==================== FINAL ROUND ====================
 
 /**
  * Run the final round (2 players left)
+ * FIX #22: Final round now properly handles perks
  */
 async function runFinalRound(gameState, session, finalPlayers) {
-  gameState.phase = 'SPINNING';
+  gameState.phase = 'FINAL_ROUND';
 
   // Send final round announcement
   const finalEmbed = Embeds.createFinalRoundEmbed(finalPlayers[0], finalPlayers[1]);
@@ -691,9 +847,10 @@ async function runFinalRound(gameState, session, finalPlayers) {
 
   await delay(2000);
 
-  // Spin for winner (whoever wheel lands on WINS)
-  const winnerIndex = randomInt(2);
-  const winner = finalPlayers[winnerIndex];
+  // Spin to select who gets to KICK (not who wins)
+  const kickerIndex = randomInt(2);
+  const kicker = finalPlayers[kickerIndex];
+  const target = finalPlayers[1 - kickerIndex]; // The other player
 
   // Generate and send final wheel GIF
   try {
@@ -703,7 +860,7 @@ async function runFinalRound(gameState, session, finalPlayers) {
       slot: p.slot,
     }));
 
-    const gifBuffer = await generateWheelGif(wheelPlayers, winnerIndex);
+    const gifBuffer = await generateWheelGif(wheelPlayers, kickerIndex);
     const attachment = new AttachmentBuilder(gifBuffer, { name: 'final-wheel.gif' });
     await gameState.channel.send({ files: [attachment] });
   } catch (error) {
@@ -711,57 +868,100 @@ async function runFinalRound(gameState, session, finalPlayers) {
     await gameState.channel.send({ content: '🎡 *جاري تدوير العجلة النهائية...*' });
   }
 
-  await delay(SPIN_ANIMATION_MS);
+  await delay(WHEEL_GIF_DURATION_MS);
 
-  // Announce winner
-  await endGame(gameState, session, winner);
+  // FIX #22: Process the kick with perks (Shield, Extra Life)
+  // The kicker "kicks" the target, perks apply!
+  const kickResult = PerksLogic.processKick(gameState.players, kicker.userId, target.userId);
+
+  if (kickResult.shieldUsed) {
+    // Target had shield - reflects to kicker
+    const shieldEmbed = Embeds.createShieldReflectEmbed(target, kicker, kickResult.extraLifeUsed);
+    await gameState.channel.send({ embeds: [shieldEmbed] });
+
+    if (kickResult.eliminated === kicker.userId) {
+      // Kicker eliminated by reflection - target wins!
+      kicker.alive = false;
+      await endGame(gameState, session, target);
+      return;
+    } else {
+      // Kicker survived with extra life - both still alive, spin again!
+      await gameState.channel.send({ content: '🔄 لم يُقصى أحد! إعادة التدوير...' });
+      await delay(2000);
+      await runFinalRound(gameState, session, gameState.players.filter(p => p.alive));
+      return;
+    }
+  }
+
+  if (kickResult.extraLifeUsed && !kickResult.eliminated) {
+    // Target survived with extra life - spin again!
+    const lifeEmbed = Embeds.createExtraLifeEmbed(target);
+    await gameState.channel.send({ embeds: [lifeEmbed] });
+    await gameState.channel.send({ content: '🔄 لم يُقصى أحد! إعادة التدوير...' });
+    await delay(2000);
+    await runFinalRound(gameState, session, gameState.players.filter(p => p.alive));
+    return;
+  }
+
+  // Normal elimination - target is out, kicker wins
+  target.alive = false;
+  const elimEmbed = Embeds.createEliminationEmbed(target, 'kicked');
+  await gameState.channel.send({ embeds: [elimEmbed] });
+  
+  await endGame(gameState, session, kicker);
 }
+
+// ==================== GAME END ====================
 
 /**
  * End game and declare winner
+ * FIX #26: Use try-finally to prevent memory leak
  */
 async function endGame(gameState, session, winner) {
   gameState.phase = 'GAME_END';
 
+  // Clear any pending timeout first
   if (gameState.turnTimeout) {
     clearTimeout(gameState.turnTimeout);
     gameState.turnTimeout = null;
   }
 
-  // Distribute rewards
-  const reward = GAMES.ROULETTE?.baseReward ?? GAME_SETTINGS.baseReward;
-  let newBalance = 0;
-
   try {
-    const result = await CurrencyService.addCoins(
-      winner.userId,
-      reward,
-      'GAME_WIN',
-      'ROULETTE',
-      { sessionId: gameState.sessionId }
-    );
-    newBalance = result?.newBalance || 0;
-  } catch (e) {
-    logger.error(`[Roulette] Failed to give reward to ${winner.userId}:`, e);
-    newBalance = await CurrencyService.getBalance(winner.userId);
+    // Distribute rewards
+    const rewardResult = await awardGameWinners({
+      gameType: 'ROULETTE',
+      sessionId: gameState.sessionId,
+      winnerIds: [winner.userId],
+      playerCount: gameState.players.length,
+      roundsPlayed: gameState.currentRound || 1
+    });
+
+    const reward = rewardResult.reward;
+    const newBalance = rewardResult.results[0]?.newBalance
+      ?? await CurrencyService.getBalance(winner.userId);
+
+    // Send winner embed
+    const winEmbed = Embeds.createWinnerEmbed(winner, reward, newBalance);
+    const winButtons = Buttons.createWinnerButtons(newBalance, reward);
+
+    await gameState.channel.send({
+      content: `<@${winner.userId}>`,
+      embeds: [winEmbed],
+      components: winButtons,
+    });
+
+    // End session in DB
+    await SessionService.endSession(gameState.sessionId, winner.userId, 'COMPLETED');
+
+    logger.info(`[Roulette] Game ended: ${gameState.sessionId} - Winner: ${winner.displayName}`);
+    
+  } finally {
+    // FIX #26: ALWAYS cleanup, even if something above throws
+    cleanupGame(gameState.sessionId);
   }
-
-  // Send winner embed
-  const winEmbed = Embeds.createWinnerEmbed(winner, reward, newBalance);
-  const winButtons = Buttons.createWinnerButtons(newBalance, reward);
-
-  await gameState.channel.send({
-    content: `<@${winner.userId}>`,
-    embeds: [winEmbed],
-    components: winButtons,
-  });
-
-  // Cleanup
-  cleanupGame(gameState.sessionId);
-  await SessionService.endSession(gameState.sessionId, winner.userId, 'COMPLETED');
-
-  logger.info(`[Roulette] Game ended: ${gameState.sessionId} - Winner: ${winner.displayName}`);
 }
+
+// ==================== CLEANUP ====================
 
 /**
  * Cancel roulette game
@@ -784,6 +984,7 @@ function cleanupGame(sessionId) {
     clearTimeout(gameState.turnTimeout);
   }
   activeGames.delete(sessionId);
+  sessionLocks.delete(sessionId); // Also clean up any locks
 }
 
 /**
@@ -794,8 +995,8 @@ export function hasActiveGame(sessionId) {
 }
 
 /**
- * Utility: delay
+ * Get active games count (for monitoring)
  */
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+export function getActiveGamesCount() {
+  return activeGames.size;
 }

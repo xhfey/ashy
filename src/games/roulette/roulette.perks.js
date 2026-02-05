@@ -1,6 +1,10 @@
 /**
  * Roulette Perks Logic
  * Handles perk purchases and usage during the game
+ *
+ * BUGS FIXED:
+ * - #31: processKick mutation documented clearly
+ * - #32: Consistent error handling (no more thrown exceptions)
  */
 
 import * as CurrencyService from '../../services/economy/currency.service.js';
@@ -10,10 +14,12 @@ import { PERKS } from './roulette.constants.js';
 
 /**
  * Purchase a perk for a player
+ * FIX #32: Consistent error handling - never throws, always returns result object
+ * 
  * @param {string} userId - Discord user ID
  * @param {string} perkId - ID of the perk to purchase
  * @param {string} sessionId - Game session ID
- * @returns {Promise<{success: boolean, perk: object, newBalance: number, error?: string}>}
+ * @returns {Promise<{success: boolean, perk?: object, newBalance?: number, error?: string}>}
  */
 export async function purchasePerk(userId, perkId, sessionId) {
   const perk = PERKS[perkId];
@@ -44,11 +50,17 @@ export async function purchasePerk(userId, perkId, sessionId) {
       newBalance: result.newBalance,
     };
   } catch (error) {
+    // FIX #32: Handle ALL errors consistently, don't throw
     if (error.name === 'InsufficientBalanceError') {
       return { success: false, error: 'INSUFFICIENT_BALANCE' };
     }
+    
     logger.error('[Roulette] Perk purchase error:', error);
-    throw error;
+    return { 
+      success: false, 
+      error: 'PURCHASE_FAILED', 
+      details: error.message 
+    };
   }
 }
 
@@ -60,19 +72,27 @@ export async function purchasePerk(userId, perkId, sessionId) {
  * @returns {boolean}
  */
 export function hasActivePerk(players, userId, perkId) {
+  if (!Array.isArray(players)) return false;
+  
   const player = players.find(p => p.userId === userId);
   if (!player) return false;
+  
   return Array.isArray(player.perks) && player.perks.includes(perkId);
 }
 
 /**
  * Use a perk (mark it as consumed)
- * @param {Array} players - Players array from game state
+ * 
+ * NOTE: This function MUTATES the players array by removing the perk.
+ * 
+ * @param {Array} players - Players array from game state (MUTATED)
  * @param {string} userId - Player's Discord ID
  * @param {string} perkId - Perk ID to use
  * @returns {boolean} - Whether perk was available and consumed
  */
 export function usePerk(players, userId, perkId) {
+  if (!Array.isArray(players)) return false;
+  
   const player = players.find(p => p.userId === userId);
   if (!player || !Array.isArray(player.perks) || !player.perks.includes(perkId)) {
     return false;
@@ -85,17 +105,28 @@ export function usePerk(players, userId, perkId) {
 
 /**
  * Add perk to player's inventory
- * @param {Array} players - Players array from game state
+ * 
+ * NOTE: This function MUTATES the players array by adding the perk.
+ * 
+ * @param {Array} players - Players array from game state (MUTATED)
  * @param {string} userId - Player's Discord ID
  * @param {string} perkId - Perk ID to add
  * @returns {boolean} - Whether perk was added successfully
  */
 export function addPerk(players, userId, perkId) {
+  if (!Array.isArray(players)) return false;
+  
   const player = players.find(p => p.userId === userId);
   if (!player) return false;
 
   if (!Array.isArray(player.perks)) {
     player.perks = [];
+  }
+
+  // Validate perk ID exists
+  if (!PERKS[perkId]) {
+    logger.warn(`[Roulette] Attempted to add invalid perk: ${perkId}`);
+    return false;
   }
 
   if (!player.perks.includes(perkId)) {
@@ -108,17 +139,23 @@ export function addPerk(players, userId, perkId) {
  * Get list of perks owned by a player
  * @param {Array} players - Players array from game state
  * @param {string} userId - Player's Discord ID
- * @returns {string[]} - Array of perk IDs
+ * @returns {string[]} - Array of perk IDs (never null)
  */
 export function getOwnedPerks(players, userId) {
+  if (!Array.isArray(players)) return [];
+  
   const player = players.find(p => p.userId === userId);
   if (!player || !Array.isArray(player.perks)) return [];
 
-  return player.perks;
+  return [...player.perks]; // Return copy to prevent external mutation
 }
 
 /**
  * Process kick attempt - handles shield and extra life logic
+ * 
+ * ⚠️ IMPORTANT: This function MUTATES the players array!
+ * It will consume perks (remove them from player.perks) as they are used.
+ * 
  * This is the core perk interaction logic:
  *
  * 1. Target has SHIELD:
@@ -133,7 +170,7 @@ export function getOwnedPerks(players, userId) {
  *
  * 3. No perks: target eliminated
  *
- * @param {Array} players - Players array from game state
+ * @param {Array} players - Players array from game state (MUTATED!)
  * @param {string} kickerId - ID of player doing the kick
  * @param {string} targetId - ID of player being kicked
  * @returns {{
@@ -144,6 +181,7 @@ export function getOwnedPerks(players, userId) {
  * }}
  */
 export function processKick(players, kickerId, targetId) {
+  // FIX #31: Document that this mutates players
   const result = {
     eliminated: null,
     reason: null,
@@ -151,15 +189,23 @@ export function processKick(players, kickerId, targetId) {
     shieldUsed: false,
   };
 
+  // Validate inputs
+  if (!Array.isArray(players) || !kickerId || !targetId) {
+    logger.warn('[Roulette] processKick called with invalid arguments');
+    result.eliminated = targetId;
+    result.reason = 'kicked';
+    return result;
+  }
+
   // Check if target has shield
   if (hasActivePerk(players, targetId, 'SHIELD')) {
-    usePerk(players, targetId, 'SHIELD');
+    usePerk(players, targetId, 'SHIELD'); // Mutates players!
     result.shieldUsed = true;
 
     // Shield reflects the kick back to the attacker
     // But attacker might have extra life!
     if (hasActivePerk(players, kickerId, 'EXTRA_LIFE')) {
-      usePerk(players, kickerId, 'EXTRA_LIFE');
+      usePerk(players, kickerId, 'EXTRA_LIFE'); // Mutates players!
       result.extraLifeUsed = true;
       // Kicker survives with extra life, no one eliminated
       result.reason = 'extra_life_saved';
@@ -174,7 +220,7 @@ export function processKick(players, kickerId, targetId) {
 
   // No shield - check if target has extra life
   if (hasActivePerk(players, targetId, 'EXTRA_LIFE')) {
-    usePerk(players, targetId, 'EXTRA_LIFE');
+    usePerk(players, targetId, 'EXTRA_LIFE'); // Mutates players!
     result.extraLifeUsed = true;
     result.reason = 'extra_life_saved';
     // Target survives, no one eliminated
@@ -189,6 +235,8 @@ export function processKick(players, kickerId, targetId) {
 
 /**
  * Check if double kick perk can be purchased during kick phase
+ * FIX #32: Consistent error handling
+ * 
  * @param {string} userId - Discord user ID
  * @returns {Promise<{canBuy: boolean, balance: number}>}
  */
@@ -199,7 +247,8 @@ export async function canBuyDoubleKick(userId) {
     return { canBuy, balance };
   } catch (error) {
     logger.error('[Roulette] Error checking double kick eligibility:', error);
-    return { canBuy: false, balance: 0 };
+    // FIX #32: Return safe default on error, but also log it
+    return { canBuy: false, balance: 0, error: error.message };
   }
 }
 
@@ -207,10 +256,28 @@ export async function canBuyDoubleKick(userId) {
  * Purchase double kick perk during kick phase
  * @param {string} userId - Discord user ID
  * @param {string} sessionId - Game session ID
- * @returns {Promise<{success: boolean, newBalance: number, error?: string}>}
+ * @returns {Promise<{success: boolean, newBalance?: number, error?: string}>}
  */
 export async function purchaseDoubleKick(userId, sessionId) {
   return purchasePerk(userId, 'DOUBLE_KICK', sessionId);
+}
+
+/**
+ * Get perk info by ID
+ * @param {string} perkId - Perk ID
+ * @returns {object|null} - Perk info or null if not found
+ */
+export function getPerkInfo(perkId) {
+  return PERKS[perkId] || null;
+}
+
+/**
+ * Get all available perks for a phase
+ * @param {string} phase - 'lobby' or 'game'
+ * @returns {object[]} - Array of perk objects
+ */
+export function getPerksForPhase(phase) {
+  return Object.values(PERKS).filter(p => p.phase === phase);
 }
 
 export default {
@@ -222,4 +289,6 @@ export default {
   processKick,
   canBuyDoubleKick,
   purchaseDoubleKick,
+  getPerkInfo,
+  getPerksForPhase,
 };

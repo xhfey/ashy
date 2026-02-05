@@ -102,6 +102,7 @@ class ButtonRouter {
           member: interaction.member,
           action,
           details,
+          values: interaction.values ?? null,
           interaction,
           channel: interaction.channel,
 

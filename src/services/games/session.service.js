@@ -59,6 +59,9 @@ export async function createSession({ gameType, guildId, channelId, user, member
     hostId: user.id,
     players: [],
     status: 'WAITING',
+    phase: 'WAITING',
+    uiVersion: 0,
+    payoutDone: false,
     gameState: {},
     winnerId: null,
     createdAt: Date.now(),
@@ -124,6 +127,15 @@ export async function setMessageId(sessionId, messageId) {
     { key: KEYS.MESSAGE + messageId, value: sessionId }
   ], SESSION_TTL);
 
+  return session;
+}
+
+/**
+ * Save session (persist updated session object)
+ */
+export async function saveSession(session) {
+  if (!session?.id) return null;
+  await RedisService.set(KEYS.SESSION + session.id, session, SESSION_TTL);
   return session;
 }
 
@@ -285,6 +297,10 @@ export async function startGame(session) {
   }
 
   session.status = 'ACTIVE';
+  session.phase = 'ACTIVE';
+  if (!Number.isFinite(session.uiVersion)) {
+    session.uiVersion = 0;
+  }
   session.startedAt = Date.now();
   session.countdownEndsAt = null;
   session.players.forEach(p => { p.status = 'playing'; });
@@ -308,6 +324,7 @@ export async function endSession(sessionId, winnerId = null, reason = 'COMPLETED
   if (!session) return { error: 'SESSION_NOT_FOUND' };
 
   session.status = 'COMPLETED';
+  session.phase = 'COMPLETED';
   session.completedAt = Date.now();
   session.winnerId = winnerId;
   session.gameState.endReason = reason;

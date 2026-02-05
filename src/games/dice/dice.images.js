@@ -8,6 +8,7 @@ import { createCanvas, loadImage, registerFont } from 'canvas';
 import { DICE_IMAGES } from './dice.constants.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import logger from '../../utils/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const imageCache = new Map();
@@ -18,7 +19,7 @@ const CACHE_CLEANUP_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
 
 setInterval(() => {
   if (imageCache.size > 0) {
-    console.log(`[DiceImages] Clearing image cache (${imageCache.size} images)`);
+    logger.info(`[DiceImages] Clearing image cache (${imageCache.size} images)`);
     imageCache.clear();
   }
 }, CACHE_CLEANUP_INTERVAL);
@@ -316,15 +317,13 @@ function getTopScorerIndex(team, round) {
   return maxScore > 0 ? topIndex : -1;
 }
 
-function sumTeamRounds(team, round) {
+function sumTeamRound(team, round) {
   if (!Array.isArray(team) || !Number.isFinite(round) || round < 1) return 0;
   let total = 0;
   for (const player of team) {
-    const scores = Array.isArray(player?.roundScores) ? player.roundScores : [];
-    for (let i = 0; i < round && i < scores.length; i++) {
-      const val = Number(scores[i] || 0);
-      if (Number.isFinite(val)) total += val;
-    }
+    const score = Array.isArray(player?.roundScores) ? player.roundScores[round - 1] : 0;
+    const val = Number(score || 0);
+    if (Number.isFinite(val)) total += val;
   }
   return total;
 }
@@ -364,11 +363,8 @@ export async function generateDiceImage(value) {
 
 export async function generateRoundSummary(roundData) {
   const { round, teamA, teamB, teamAScore, teamBScore } = roundData;
-  const hasRoundScores = [...teamA, ...teamB].some(
-    (player) => Array.isArray(player?.roundScores) && player.roundScores.length > 0
-  );
-  const totalTeamA = hasRoundScores ? sumTeamRounds(teamA, round) : teamAScore;
-  const totalTeamB = hasRoundScores ? sumTeamRounds(teamB, round) : teamBScore;
+  const totalTeamA = Number.isFinite(teamAScore) ? teamAScore : sumTeamRound(teamA, round);
+  const totalTeamB = Number.isFinite(teamBScore) ? teamBScore : sumTeamRound(teamB, round);
 
   // Render at 2x scale
   const renderCanvas = createCanvas(LAYOUT.WIDTH * RENDER_SCALE, LAYOUT.HEIGHT * RENDER_SCALE);

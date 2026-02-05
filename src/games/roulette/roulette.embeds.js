@@ -1,10 +1,13 @@
 /**
  * Roulette Embed Builders
  * All Discord embeds for the roulette game
+ *
+ * BUGS FIXED:
+ * - #29: Removed unused userId parameter from createShopEmbed
  */
 
 import { EmbedBuilder } from 'discord.js';
-import { EMBED_COLORS, PERKS, NUMBER_EMOJIS, GAME_SETTINGS } from './roulette.constants.js';
+import { EMBED_COLORS, PERKS, GAME_SETTINGS, getNumberEmoji } from './roulette.constants.js';
 
 /**
  * Create lobby embed showing available slots and current players
@@ -14,13 +17,18 @@ export function createLobbyEmbed(session, remainingSeconds) {
 
   // Build player list with slot numbers
   let playerList = '';
-  const sortedPlayers = [...players].sort((a, b) => (a.slot || 0) - (b.slot || 0));
+  // Sort with proper handling of undefined slots
+  const sortedPlayers = [...players].sort((a, b) => {
+    const slotA = a.slot ?? Infinity;
+    const slotB = b.slot ?? Infinity;
+    return slotA - slotB;
+  });
 
   if (sortedPlayers.length === 0) {
     playerList = '> لا يوجد لاعبين بعد';
   } else {
     playerList = sortedPlayers
-      .map(p => `> ${NUMBER_EMOJIS[p.slot] || p.slot} <@${p.userId}>`)
+      .map(p => `> ${getNumberEmoji(p.slot)} <@${p.userId}>`)
       .join('\n');
   }
 
@@ -58,8 +66,9 @@ export function createLobbyEmbed(session, remainingSeconds) {
 
 /**
  * Create shop embed showing available perks
+ * FIX #29: Removed unused userId parameter
  */
-export function createShopEmbed(userId, ownedPerks = [], balance = 0) {
+export function createShopEmbed(ownedPerks = [], balance = 0) {
   const perksList = Object.values(PERKS)
     .filter(p => p.phase === 'lobby')
     .map(perk => {
@@ -98,7 +107,7 @@ export function createGameStartEmbed() {
  */
 export function createRoundEmbed(roundNumber, alivePlayers) {
   const playerList = alivePlayers
-    .map(p => `${NUMBER_EMOJIS[p.slot] || p.slot} ${p.displayName}`)
+    .map(p => `${getNumberEmoji(p.slot)} ${p.displayName}`)
     .join(' • ');
 
   return new EmbedBuilder()
@@ -118,7 +127,7 @@ export function createChosenEmbed(player, roundNumber) {
   return new EmbedBuilder()
     .setTitle(`🎡 الجولة ${roundNumber}`)
     .setDescription(
-      `${NUMBER_EMOJIS[player.slot] || player.slot} **تم اختيارك!**\n\n` +
+      `${getNumberEmoji(player.slot)} **تم اختيارك!**\n\n` +
       `<@${player.userId}> لديك **${GAME_SETTINGS.kickTimeout} ثانية** لاختيار لاعب لطرده.`
     )
     .setColor(EMBED_COLORS.kick);
@@ -129,7 +138,7 @@ export function createChosenEmbed(player, roundNumber) {
  */
 export function createKickSelectionEmbed(kickerPlayer, targetPlayers) {
   const targetsList = targetPlayers
-    .map(p => `${NUMBER_EMOJIS[p.slot] || p.slot} ${p.displayName}`)
+    .map(p => `${getNumberEmoji(p.slot)} ${p.displayName}`)
     .join('\n');
 
   const description = `<@${kickerPlayer.userId}> اختر لاعباً لطرده:\n\n${targetsList}`;
@@ -200,10 +209,10 @@ export function createFinalRoundEmbed(player1, player2) {
     .setTitle('👑 الجولة الأخيرة!')
     .setDescription(
       '**هذه الجولة الأخيرة!**\n\n' +
-      `${NUMBER_EMOJIS[player1.slot] || player1.slot} <@${player1.userId}>\n` +
+      `${getNumberEmoji(player1.slot)} <@${player1.userId}>\n` +
       `⚔️ ضد\n` +
-      `${NUMBER_EMOJIS[player2.slot] || player2.slot} <@${player2.userId}>\n\n` +
-      '🎰 اللاعب المختار هو **الفائز**!'
+      `${getNumberEmoji(player2.slot)} <@${player2.userId}>\n\n` +
+      '🎰 من سيفوز؟'
     )
     .setColor(EMBED_COLORS.winner);
 }

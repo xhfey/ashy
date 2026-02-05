@@ -12,9 +12,8 @@ import {
 } from 'discord.js';
 import { randomInt } from 'crypto';
 import * as SessionService from '../../services/games/session.service.js';
-import * as CurrencyService from '../../services/economy/currency.service.js';
 import { buttonRouter, codec } from '../../framework/index.js';
-import { GAMES } from '../../config/games.config.js';
+import { awardGameWinners } from '../../services/economy/rewards.service.js';
 import {
   rollDie,
   performSecondRoll,
@@ -41,6 +40,21 @@ import logger from '../../utils/logger.js';
 // Store active games (sessionId -> game state)
 const activeGames = new Map();
 const DECISION_FEEDBACK_DELAY_MS = 1200;
+
+function formatMultiplierLine(multiplier, finalScore) {
+  if (!Number.isFinite(multiplier) || multiplier === 1) return '';
+  return `\n⚖️ ×${multiplier.toFixed(1)} = **${finalScore}**`;
+}
+
+async function bumpUiVersion(ctx, gameState) {
+  if (!ctx?.commit) return;
+  try {
+    await ctx.commit();
+    gameState.uiVersion = ctx.session?.uiVersion || 0;
+  } catch (error) {
+    logger.error('[Dice] Failed to sync uiVersion:', error);
+  }
+}
 
 /**
  * Register dice handler with ButtonRouter
@@ -108,7 +122,7 @@ async function handleRollAgainFromCtx(ctx, gameState) {
   gameState.turnState.waiting = null;
 
   // Increment uiVersion for stale-click detection
-  gameState.uiVersion = (gameState.uiVersion || 0) + 1;
+  await bumpUiVersion(ctx, gameState);
 
   // Show immediate feedback
   try {
@@ -169,8 +183,11 @@ async function handleSkipFromCtx(ctx, gameState) {
     return;
   }
 
+  // Clear timeout to avoid double-processing on edge timing
+  clearTimeout(gameState.turnTimeout);
+
   // Increment uiVersion for stale-click detection
-  gameState.uiVersion = (gameState.uiVersion || 0) + 1;
+  await bumpUiVersion(ctx, gameState);
 
   try {
     await interaction.message.edit({
@@ -214,14 +231,16 @@ async function handleBlockTargetFromCtx(ctx, gameState, targetId) {
   }
 
   const firstRoll = gameState.turnState.firstRoll;
+  const turnScore = applyMultiplier(firstRoll, currentPlayer.scoreMultiplier);
+  const multiplierLine = formatMultiplierLine(currentPlayer.scoreMultiplier, turnScore);
 
   // Increment uiVersion
-  gameState.uiVersion = (gameState.uiVersion || 0) + 1;
+  await bumpUiVersion(ctx, gameState);
 
   // Update message
   try {
     await interaction.message.edit({
-      content: `✅ ${MESSAGES.BLOCKED_PLAYER(`<@${target.userId}>`)}\n${MESSAGES.CURRENT_SCORE(currentPlayer.totalScore + firstRoll)}`,
+      content: `✅ ${MESSAGES.BLOCKED_PLAYER(`<@${target.userId}>`)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(currentPlayer.totalScore + turnScore)}`,
       components: [],
     });
   } catch (e) {}
@@ -273,6 +292,11 @@ export async function startDiceGame(session, channel) {
   try {
     logger.info(`Starting Dice game: ${session.id}`);
 
+    // Ensure session has phase/uiVersion for v1 buttons
+    if (!session.phase) session.phase = 'ACTIVE';
+    if (!Number.isFinite(session.uiVersion)) session.uiVersion = 0;
+    await SessionService.saveSession(session);
+
     // Assign teams
     const { teamA, teamB } = assignTeams(session.players);
 
@@ -300,7 +324,7 @@ export async function startDiceGame(session, channel) {
       turnTimeout: null,
       blockTimeout: null,
       cancelled: false,
-      uiVersion: 0, // For v1 button stale-click detection
+      uiVersion: session.uiVersion || 0, // For v1 button stale-click detection
     };
 
     activeGames.set(session.id, gameState);
@@ -448,6 +472,8 @@ async function startPlayerTurn(gameState, player) {
 
   // Roll first die
   const firstRoll = rollDie(player.hasBetterLuck);
+  const turnScore = applyMultiplier(firstRoll, player.scoreMultiplier);
+  const multiplierLine = formatMultiplierLine(player.scoreMultiplier, turnScore);
 
   // Store turn state
   gameState.turnState = {
@@ -467,7 +493,7 @@ async function startPlayerTurn(gameState, player) {
 
   // PLAIN TEXT - NO EMBED
   const message = await gameState.channel.send({
-    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}\n${MESSAGES.CURRENT_SCORE(player.totalScore + firstRoll)}`,
+    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore + turnScore)}`,
     files: [attachment],
     components: [row],
   });
@@ -486,85 +512,6 @@ async function startPlayerTurn(gameState, player) {
 }
 
 /**
- * Handle Roll Again button (LEGACY - kept for reference)
- * @deprecated Use handleRollAgainFromCtx via ButtonRouter
- */
-async function handleRollAgain(interaction, sessionId) {
-  const gameState = activeGames.get(sessionId);
-  try {
-    if (!gameState || gameState.cancelled) {
-      return interaction.reply({ content: '❌ اللعبة انتهت', ephemeral: true });
-    }
-
-    // Verify it's the correct player
-    if (gameState.turnState?.playerId !== interaction.user.id) {
-      return interaction.reply({ content: '❌ ليس دورك!', ephemeral: true });
-    }
-
-    if (gameState.turnState?.waiting !== 'DECISION') {
-      return interaction.reply({ content: '❌ لا يمكنك الضغط الآن', ephemeral: true });
-    }
-
-    // Clear timeout
-    clearTimeout(gameState.turnTimeout);
-
-    const player = getCurrentPlayer(gameState);
-    const firstRoll = gameState.turnState.firstRoll;
-
-    // Perform second roll
-    const secondRoll = performSecondRoll(firstRoll, player.hasBetterLuck);
-    gameState.turnState.secondRoll = secondRoll;
-    gameState.turnState.waiting = null;
-
-    // Ack interaction and show immediate feedback
-    await interaction.deferUpdate().catch(() => {});
-    try {
-      await interaction.message.edit({
-        components: [buildDecisionButtons(gameState, 'ROLL', true)]
-      });
-    } catch (e) {}
-
-    await delay(DECISION_FEEDBACK_DELAY_MS);
-    if (isGameCancelled(gameState)) return;
-
-    // Generate second roll image
-    let imageName;
-    if (secondRoll.type === 'NORMAL') {
-      imageName = secondRoll.value;
-    } else if (secondRoll.type === 'MODIFIER') {
-      imageName = secondRoll.display;
-    } else {
-      imageName = secondRoll.type;
-    }
-    const diceImage = await generateDiceImage(imageName);
-    const attachment = new AttachmentBuilder(diceImage, { name: 'dice2.png' });
-
-    // Handle different outcomes
-    switch (secondRoll.type) {
-      case 'X2':
-        await handleX2(interaction, gameState, player, firstRoll, attachment);
-        break;
-      case 'BLOCK':
-        await handleBlock(interaction, gameState, player, firstRoll, attachment);
-        break;
-      case 'ZERO':
-        await handleZero(interaction, gameState, player, attachment);
-        break;
-      case 'MODIFIER':
-        await handleModifier(interaction, gameState, player, firstRoll, secondRoll, attachment);
-        break;
-      case 'NORMAL':
-      default:
-        await handleNormalSecond(interaction, gameState, player, secondRoll, attachment);
-        break;
-    }
-  } catch (error) {
-    handleGameError(gameState, error, 'handleRollAgain');
-    throw error;
-  }
-}
-
-/**
  * Handle Skip button
  */
 export async function handleSkip(gameState, player, message, wasTimeout = false) {
@@ -575,6 +522,7 @@ export async function handleSkip(gameState, player, message, wasTimeout = false)
 
     const firstRoll = gameState.turnState.firstRoll;
     const turnScore = applyMultiplier(firstRoll, player.scoreMultiplier);
+    const multiplierLine = formatMultiplierLine(player.scoreMultiplier, turnScore);
 
     // Update player score (defensive: ensure roundScores is a number)
     const idx = gameState.round - 1;
@@ -594,7 +542,7 @@ export async function handleSkip(gameState, player, message, wasTimeout = false)
     // Update message (remove buttons) - PLAIN TEXT
     try {
       await message.edit({
-        content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(turnScore)}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+        content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
         components: [],
       });
     } catch (e) {
@@ -616,46 +564,13 @@ export async function handleSkip(gameState, player, message, wasTimeout = false)
 }
 
 /**
- * Handle Skip button from interaction (LEGACY - kept for reference)
- * @deprecated Use handleSkipFromCtx via ButtonRouter
- */
-async function handleSkipButton(interaction, sessionId) {
-  const gameState = activeGames.get(sessionId);
-  try {
-    if (!gameState) return interaction.reply({ content: '❌ اللعبة انتهت', ephemeral: true });
-
-    if (gameState.turnState?.playerId !== interaction.user.id) {
-      return interaction.reply({ content: '❌ ليس دورك!', ephemeral: true });
-    }
-
-    if (gameState.turnState?.waiting !== 'DECISION') {
-      return interaction.reply({ content: '❌ لا يمكنك الضغط الآن', ephemeral: true });
-    }
-
-    await interaction.deferUpdate().catch(() => {});
-    try {
-      await interaction.message.edit({
-        components: [buildDecisionButtons(gameState, 'SKIP', true)]
-      });
-    } catch (e) {}
-
-    await delay(DECISION_FEEDBACK_DELAY_MS);
-    if (isGameCancelled(gameState)) return;
-
-    const player = getCurrentPlayer(gameState);
-    await handleSkip(gameState, player, interaction.message, false);
-  } catch (error) {
-    handleGameError(gameState, error, 'handleSkipButton');
-    throw error;
-  }
-}
-
-/**
  * Handle X2 outcome
  */
 async function handleX2(interaction, gameState, player, firstRoll, attachment) {
   if (isGameCancelled(gameState)) return;
-  const turnScore = applyMultiplier(firstRoll * 2, player.scoreMultiplier);
+  const baseScore = firstRoll * 2;
+  const turnScore = applyMultiplier(baseScore, player.scoreMultiplier);
+  const multiplierLine = formatMultiplierLine(player.scoreMultiplier, turnScore);
 
   // Defensive: ensure roundScores is a number
   const idx = gameState.round - 1;
@@ -672,7 +587,7 @@ async function handleX2(interaction, gameState, player, firstRoll, attachment) {
   // PLAIN TEXT - NO EMBED
   const channel = interaction.channel || gameState.channel;
   await channel.send({
-    content: `<@${player.userId}>\n🎲 ${MESSAGES.GOT_X2}\n${firstRoll} × 2 = **${turnScore}**\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+    content: `<@${player.userId}>\n🎲 ${MESSAGES.GOT_X2}\n${firstRoll} × 2 = **${baseScore}**${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
     files: [attachment],
   });
 
@@ -702,7 +617,7 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
     // PLAIN TEXT - NO EMBED
     const channel = interaction.channel || gameState.channel;
     await channel.send({
-      content: `<@${player.userId}>\n${MESSAGES.BLOCK_LAST_ROUND(`<@${player.userId}>`)}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+      content: `${MESSAGES.BLOCK_LAST_ROUND(`<@${player.userId}>`)}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
       files: [attachment],
     });
 
@@ -713,6 +628,11 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
   // Get opposite team for blocking
   const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
   const teamLetter = gameState.phase === 'TEAM_A' ? 'B' : 'A';
+  const blockedSet = new Set(gameState.blockedNextRound[teamLetter] || []);
+  let availableTargets = oppositeTeam.filter(p => !blockedSet.has(p.userId));
+  if (availableTargets.length === 0) {
+    availableTargets = oppositeTeam;
+  }
 
   // Build session-like object for codec
   const sessionRef = {
@@ -725,7 +645,7 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
   const rows = [];
   let currentRow = new ActionRowBuilder();
 
-  for (const opponent of oppositeTeam) {
+  for (const opponent of availableTargets) {
     if (currentRow.components.length >= 5) {
       rows.push(currentRow);
       currentRow = new ActionRowBuilder();
@@ -764,7 +684,8 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
       if (isGameCancelled(gameState)) return;
       void (async () => {
         // Auto-select random
-        const randomTarget = oppositeTeam[randomInt(oppositeTeam.length)];
+        const targetPool = availableTargets.length > 0 ? availableTargets : oppositeTeam;
+        const randomTarget = targetPool[randomInt(targetPool.length)];
         try {
           const blockMessage = await gameState.channel.messages.fetch(gameState.messageId);
           // PLAIN TEXT - NO EMBED
@@ -783,49 +704,6 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
 }
 
 /**
- * Handle block target selection (LEGACY - kept for reference)
- * @deprecated Use handleBlockTargetFromCtx via ButtonRouter
- */
-async function handleBlockTarget(interaction, sessionId, targetId) {
-  const gameState = activeGames.get(sessionId);
-  try {
-    if (!gameState) return interaction.reply({ content: '❌ اللعبة انتهت', ephemeral: true });
-
-    if (gameState.turnState?.playerId !== interaction.user.id) {
-      return interaction.reply({ content: '❌ ليس دورك!', ephemeral: true });
-    }
-
-    if (gameState.turnState?.waiting !== 'BLOCK_TARGET') {
-      return interaction.reply({ content: '❌ لا يمكنك الضغط الآن', ephemeral: true });
-    }
-
-    clearTimeout(gameState.blockTimeout);
-
-    const player = getCurrentPlayer(gameState);
-    const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
-    const teamLetter = gameState.phase === 'TEAM_A' ? 'B' : 'A';
-    const target = oppositeTeam.find(p => p.userId === targetId);
-
-    if (!target) {
-      return interaction.reply({ content: '❌ لاعب غير موجود', ephemeral: true });
-    }
-
-    const firstRoll = gameState.turnState.firstRoll;
-
-    // PLAIN TEXT - NO EMBED
-    await interaction.update({
-      content: `✅ ${MESSAGES.BLOCKED_PLAYER(`<@${target.userId}>`)}\n${MESSAGES.CURRENT_SCORE(player.totalScore + firstRoll)}`,
-      components: [],
-    });
-
-    await applyBlock(gameState, player, target, teamLetter, false, false);
-  } catch (error) {
-    handleGameError(gameState, error, 'handleBlockTarget');
-    throw error;
-  }
-}
-
-/**
  * Apply block to target
  */
 async function applyBlock(gameState, player, target, teamLetter, wasTimeout, sendMessage = true) {
@@ -834,7 +712,10 @@ async function applyBlock(gameState, player, target, teamLetter, wasTimeout, sen
   const turnScore = applyMultiplier(firstRoll, player.scoreMultiplier);
 
   // Add to blocked list
-  gameState.blockedNextRound[teamLetter].push(target.userId);
+  const blockedList = gameState.blockedNextRound[teamLetter];
+  if (!blockedList.includes(target.userId)) {
+    blockedList.push(target.userId);
+  }
 
   // Update player score (defensive: ensure roundScores is a number)
   const idx = gameState.round - 1;
@@ -896,6 +777,7 @@ async function handleZero(interaction, gameState, player, attachment) {
 async function handleModifier(interaction, gameState, player, firstRoll, secondRoll, attachment) {
   if (isGameCancelled(gameState)) return;
   const turnScore = applyMultiplier(secondRoll.value, player.scoreMultiplier); // (firstRoll + modifier) * multiplier
+  const multiplierLine = formatMultiplierLine(player.scoreMultiplier, turnScore);
 
   // Defensive: ensure roundScores is a number
   const idx = gameState.round - 1;
@@ -912,7 +794,7 @@ async function handleModifier(interaction, gameState, player, firstRoll, secondR
   // PLAIN TEXT - NO EMBED
   const channel = interaction.channel || gameState.channel;
   await channel.send({
-    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED_WITH_MODIFIER(firstRoll, secondRoll.modifier)}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED_WITH_MODIFIER(firstRoll, secondRoll.modifier)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
     files: [attachment],
   });
 
@@ -925,6 +807,7 @@ async function handleModifier(interaction, gameState, player, firstRoll, secondR
 async function handleNormalSecond(interaction, gameState, player, secondRoll, attachment) {
   if (isGameCancelled(gameState)) return;
   const turnScore = applyMultiplier(secondRoll.value, player.scoreMultiplier);
+  const multiplierLine = formatMultiplierLine(player.scoreMultiplier, turnScore);
 
   // Defensive: ensure roundScores is a number
   const idx = gameState.round - 1;
@@ -942,7 +825,7 @@ async function handleNormalSecond(interaction, gameState, player, secondRoll, at
   // PLAIN TEXT - NO EMBED
   const channel = interaction.channel || gameState.channel;
   await channel.send({
-    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(turnScore)}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(secondRoll.value)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
     files: [attachment],
   });
 
@@ -1050,7 +933,18 @@ async function endGame(gameState) {
   });
 
   // Distribute rewards
-  await distributeRewards(gameState, winner);
+  if (winner !== 'TIE') {
+    const winnerIds = winner === 'A'
+      ? gameState.teamA.map(p => p.userId)
+      : gameState.teamB.map(p => p.userId);
+    await awardGameWinners({
+      gameType: 'DICE',
+      sessionId: gameState.sessionId,
+      winnerIds,
+      playerCount: gameState.teamA.length + gameState.teamB.length,
+      roundsPlayed: TOTAL_ROUNDS
+    });
+  }
 
   // Cleanup
   activeGames.delete(gameState.sessionId);
@@ -1059,33 +953,6 @@ async function endGame(gameState) {
   await SessionService.endSession(gameState.sessionId, null, 'COMPLETED');
 
   logger.info(`Dice game ended: ${gameState.sessionId} - Winner: Team ${winner}`);
-}
-
-/**
- * Distribute coins to winners
- */
-async function distributeRewards(gameState, winner) {
-  if (winner === 'TIE') {
-    // No rewards on tie (or split equally?)
-    return;
-  }
-
-  const winningTeam = winner === 'A' ? gameState.teamA : gameState.teamB;
-  const reward = GAMES.DICE?.baseReward ?? 8;
-
-  for (const player of winningTeam) {
-    try {
-      await CurrencyService.addCoins(
-        player.userId,
-        reward,
-        'GAME_WIN',
-        'DICE',
-        { sessionId: gameState.sessionId }
-      );
-    } catch (e) {
-      logger.error(`Failed to give reward to ${player.userId}:`, e);
-    }
-  }
 }
 
 /**

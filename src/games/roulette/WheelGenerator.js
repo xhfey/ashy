@@ -17,6 +17,13 @@
  * 12. Pre-calculated math (no per-frame calculations)
  * 13. High-quality image smoothing
  * 14. Final hold frames for better loop experience
+ *
+ * BUGS FIXED:
+ * - #21: speed variable undefined (now calculated properly)
+ * - Fractional spin offset calculation
+ * - Motion blur consistency (degrees per second)
+ * - Asset cache race conditions
+ * - Visual jump before celebration
  */
 
 import { createCanvas, loadImage, registerFont } from 'canvas';
@@ -57,9 +64,9 @@ const CANVAS = {
 };
 
 const WHEEL = {
-  outerRadius: 220 * SCALE,
+  outerRadius: 235 * SCALE,
   innerRadius: 60 * SCALE,
-  textRadius: 150 * SCALE,
+  textRadius: 165 * SCALE,
 };
 
 const POINTER = {
@@ -98,6 +105,8 @@ const ANIMATION = {
   celebrationFrames: 30, // Hold on winner (1.5s at 20fps)
   motionBlurStrength: 0.15, // Motion blur alpha
   motionBlurOffset: 2, // Motion blur angle offset
+  // Tick effect threshold - when speed drops below this (deg/sec), apply ticking
+  tickSpeedThreshold: 300,
 };
 
 // ==================== ASSET CACHE ====================
@@ -110,10 +119,10 @@ function loadAsset(filename) {
 
   const promise = (async () => {
     try {
-      const assetPath = path.join(__dirname, '../../../assets/images/roulette', filename);
+      const assetPath = path.join(__dirname, '../../../assets/images/roulette-wheel', filename);
       return await loadImage(assetPath);
     } catch (e) {
-      logger.error(`[WheelGenerator] Failed to load asset ${filename}: ${e.message}`);
+      logger.warn(`[WheelGenerator] Asset not found ${filename}, using fallback`);
       return null; // Cache null to prevent repeated load attempts
     }
   })();
@@ -154,12 +163,10 @@ function easeOutFriction(t) {
 }
 
 /**
- * Anticipation ease (slight wind-back)
+ * Smooth anticipation ease (monotonic 0..1)
  */
-function easeInBack(t) {
-  const c1 = 1.70158;
-  const c3 = c1 + 1;
-  return c3 * t * t * t - c1 * t * t;
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
 }
 
 /**
@@ -178,7 +185,32 @@ function normalizeAngle(angle) {
   return angle < 0 ? angle + 360 : angle;
 }
 
+/**
+ * Frame delay for spin phase (matches generator timing)
+ */
+function getSpinFrameDelay(t) {
+  if (t < 0.3) return 35;
+  if (t < 0.7) return 45;
+  return 55;
+}
+
 // ==================== PRE-CALCULATION ====================
+
+/**
+ * Pre-calculate all segment data to avoid per-frame calculations
+ */
+function getSegmentColorIndex(i, numSegments) {
+  const colorCount = SEGMENT_COLORS.length;
+
+  if (numSegments <= colorCount) {
+    return i % colorCount;
+  }
+
+  // Offset each palette cycle to avoid adjacent duplicates when wrapping
+  const cycle = Math.floor(i / colorCount);
+  const offset = cycle % colorCount;
+  return (i + offset) % colorCount;
+}
 
 /**
  * Pre-calculate all segment data to avoid per-frame calculations
@@ -196,14 +228,17 @@ function preCalculateSegments(players) {
     const startAngle = i * segmentAngle;
     const endAngle = (i + 1) * segmentAngle;
     const midAngle = startAngle + segmentAngle / 2;
-    const color = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
+    const colorIndex = getSegmentColorIndex(i, numSegments);
+    const color = SEGMENT_COLORS[colorIndex];
 
-    // Smart font sizing based on name length
-    const nameLength = (player.displayName || player.name || 'Unknown').length;
+    // Smart font sizing based on name length and player count
+    const displayName = truncateText(player.displayName || player.name || 'Unknown');
+    const nameLength = displayName.length;
     let fontSize;
-    if (nameLength > 12) fontSize = 12 * SCALE;
+    if (numSegments > 12) fontSize = 11 * SCALE;
+    else if (nameLength > 12) fontSize = 12 * SCALE;
     else if (nameLength > 8) fontSize = 14 * SCALE;
-    else if (players.length > 8) fontSize = 14 * SCALE;
+    else if (numSegments > 8) fontSize = 14 * SCALE;
     else fontSize = 16 * SCALE;
 
     return {
@@ -215,7 +250,7 @@ function preCalculateSegments(players) {
       textAngle: midAngle,
       fontSize,
       textColor: getTextColor(color),
-      displayName: truncateText(player.displayName || player.name || 'Unknown'),
+      displayName,
     };
   });
 }
@@ -227,27 +262,28 @@ function preCalculateSegments(players) {
  */
 async function createStaticLayers() {
   const [bgImg, frameImg, centerImg, pointerImg] = await Promise.all([
-    loadAsset('wheel-background.png'),
-    loadAsset('wheel-frame.png'),
-    loadAsset('wheel-center.png'),
-    loadAsset('pointer.png')
+    loadAsset('roulette-wheel-bg.png'),
+    loadAsset('roulette-wheel-frame.png'),
+    loadAsset('roulette-wheel-center.png'),
+    loadAsset('roulette-wheel-pointer.png')
   ]);
 
-  // Create background layer (550x550)
-  const bgCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
-  const bgCtx = bgCanvas.getContext('2d', { alpha: false });
+  // Base layer (solid fill to avoid GIF transparency artifacts)
+  const baseCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
+  const baseCtx = baseCanvas.getContext('2d', { alpha: false });
 
   // Pre-fill with background color (prevents transparent PNG pixels turning black)
-  bgCtx.fillStyle = '#1a1a2e';
-  bgCtx.fillRect(0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+  baseCtx.fillStyle = '#1a1a2e';
+  baseCtx.fillRect(0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
 
-  if (bgImg) {
-    bgCtx.drawImage(bgImg, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
-  }
-
-  // Create overlay layer (frame + center + pointer)
+  // Create overlay layer (background art + frame + center + pointer)
   const overlayCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
   const overlayCtx = overlayCanvas.getContext('2d', { alpha: true });
+
+  // Background art (transparent hole lets the wheel show underneath)
+  if (bgImg) {
+    overlayCtx.drawImage(bgImg, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+  }
 
   // Frame (fallback: draw a circular border)
   if (frameImg) {
@@ -292,7 +328,7 @@ async function createStaticLayers() {
     overlayCtx.stroke();
   }
 
-  return { bgCanvas, overlayCanvas };
+  return { baseCanvas, overlayCanvas };
 }
 
 // ==================== WHEEL SEGMENT DRAWING ====================
@@ -435,7 +471,7 @@ export async function generateWheelGif(players, winnerIndex) {
   const segments = preCalculateSegments(players);
 
   // Pre-render static layers
-  const { bgCanvas, overlayCanvas } = await createStaticLayers();
+  const { baseCanvas, overlayCanvas } = await createStaticLayers();
 
   // Setup encoder
   const encoder = new GIFEncoder(CANVAS.targetWidth, CANVAS.targetHeight);
@@ -477,15 +513,22 @@ export async function generateWheelGif(players, winnerIndex) {
   // Calculate frame timing
   const totalSpinFrames = Math.floor(ANIMATION.duration * ANIMATION.baseFps);
 
-  let currentAngle = 0;
+  const windBackDegrees = ANIMATION.anticipationFrames > 0 ? -15 : 0;
+  const spinStartAngle = windBackDegrees;
+  const spinDistance = totalSpin - spinStartAngle;
+
+  let currentAngle = spinStartAngle;
+  let previousAngle = spinStartAngle;
   let lastSegmentIndex = -1;
 
   // ===== ANTICIPATION PHASE =====
   for (let i = 0; i < ANIMATION.anticipationFrames; i++) {
-    const t = i / ANIMATION.anticipationFrames;
-    const windBack = easeInBack(t) * -15; // Wind back 15 degrees
+    const t = ANIMATION.anticipationFrames > 1
+      ? i / (ANIMATION.anticipationFrames - 1)
+      : 1;
+    const windBack = windBackDegrees * easeOutCubic(t);
 
-    finalCtx.drawImage(bgCanvas, 0, 0);
+    finalCtx.drawImage(baseCanvas, 0, 0);
 
     wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
     drawWheelSegments(wheelCtx, segments, windBack);
@@ -504,14 +547,16 @@ export async function generateWheelGif(players, winnerIndex) {
   for (let i = 0; i < totalSpinFrames; i++) {
     const t = i / totalSpinFrames;
     const easedProgress = easeOutFriction(t);
-    currentAngle = easedProgress * totalSpin;
+    currentAngle = spinStartAngle + easedProgress * spinDistance;
 
     // Variable frame delay (faster during speed, slower during reveal)
-    const delay = t < 0.3 ? 35 : (t < 0.7 ? 45 : 55);
+    const delay = getSpinFrameDelay(t);
     const dt = delay / 1000; // Convert to seconds
 
-    // Calculate current speed in degrees per SECOND for consistent motion blur
-    const deltaAngle = i > 0 ? Math.abs(currentAngle - (easeOutFriction((i - 1) / totalSpinFrames) * totalSpin)) : 10;
+    // Calculate delta angle for this frame
+    const deltaAngle = Math.abs(currentAngle - previousAngle);
+    
+    // FIX #21: Calculate speed properly (was undefined before!)
     const speedDegPerSec = deltaAngle / dt;
 
     // Segment ticking effect near the end
@@ -521,8 +566,9 @@ export async function generateWheelGif(players, winnerIndex) {
     if (t > tickThreshold) {
       const currentSegmentIndex = Math.floor((normalizeAngle(currentAngle) / segmentAngle)) % numSegments;
 
-      // Add slight pause/snap when crossing segment boundary
-      if (currentSegmentIndex !== lastSegmentIndex && speed < 5) {
+      // Add slight pause/snap when crossing segment boundary at low speed
+      // FIX #21: Use calculated speed instead of undefined variable
+      if (currentSegmentIndex !== lastSegmentIndex && speedDegPerSec < ANIMATION.tickSpeedThreshold) {
         displayAngle = Math.round(currentAngle / (segmentAngle / 2)) * (segmentAngle / 2);
       }
 
@@ -530,7 +576,7 @@ export async function generateWheelGif(players, winnerIndex) {
     }
 
     // Composite frame
-    finalCtx.drawImage(bgCanvas, 0, 0);
+    finalCtx.drawImage(baseCanvas, 0, 0);
 
     // Draw wheel with motion blur (using degrees per second for consistent blur)
     drawWheelWithBlur(wheelCtx, segments, displayAngle, speedDegPerSec);
@@ -541,13 +587,16 @@ export async function generateWheelGif(players, winnerIndex) {
     encoder.setDelay(delay);
     encoder.addFrame(finalCtx);
 
+    // Store previous angle for next iteration's delta calculation
+    previousAngle = currentAngle;
+
     // Yield every 5 frames
     if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
 
   // ===== EXACT LANDING FRAME (prevents visual jump into celebration) =====
   const normalizedFinalAngle = normalizeAngle(totalSpin);
-  finalCtx.drawImage(bgCanvas, 0, 0);
+  finalCtx.drawImage(baseCanvas, 0, 0);
   wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
   drawWheelSegments(wheelCtx, segments, normalizedFinalAngle, false, -1);
   finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
@@ -557,7 +606,7 @@ export async function generateWheelGif(players, winnerIndex) {
 
   // ===== CELEBRATION PHASE (Winner Highlight) =====
   for (let i = 0; i < ANIMATION.celebrationFrames; i++) {
-    finalCtx.drawImage(bgCanvas, 0, 0);
+    finalCtx.drawImage(baseCanvas, 0, 0);
 
     // Pulsing winner highlight
     const pulse = i % 10 < 5;
@@ -579,12 +628,39 @@ export async function generateWheelGif(players, winnerIndex) {
   return encoder.out.getData();
 }
 
+function computeSpinPhaseDurationMs() {
+  const totalSpinFrames = Math.floor(ANIMATION.duration * ANIMATION.baseFps);
+  if (totalSpinFrames <= 0) return 0;
+
+  let total = 0;
+  for (let i = 0; i < totalSpinFrames; i++) {
+    const t = i / totalSpinFrames;
+    total += getSpinFrameDelay(t);
+  }
+  return total;
+}
+
+function computeWheelGifDurationMs() {
+  const anticipationMs = ANIMATION.anticipationFrames * 60;
+  const spinMs = computeSpinPhaseDurationMs();
+  const landingMs = 60;
+  const celebrationMs = ANIMATION.celebrationFrames * 50;
+  return anticipationMs + spinMs + landingMs + celebrationMs;
+}
+
+export const WHEEL_GIF_DURATION_MS = computeWheelGifDurationMs();
+
 /**
  * Generate a static wheel image (for preview)
  */
 export async function generateStaticWheel(players) {
+  // Input validation
+  if (!Array.isArray(players) || players.length === 0) {
+    throw new Error('[WheelGenerator] players must be a non-empty array');
+  }
+
   const segments = preCalculateSegments(players);
-  const { bgCanvas, overlayCanvas } = await createStaticLayers();
+  const { baseCanvas, overlayCanvas } = await createStaticLayers();
 
   const wheelCanvas = createCanvas(CANVAS.width, CANVAS.height);
   const wheelCtx = wheelCanvas.getContext('2d', { alpha: true });
@@ -595,7 +671,7 @@ export async function generateStaticWheel(players) {
   finalCtx.imageSmoothingEnabled = true;
   finalCtx.imageSmoothingQuality = 'high';
 
-  finalCtx.drawImage(bgCanvas, 0, 0);
+  finalCtx.drawImage(baseCanvas, 0, 0);
 
   drawWheelSegments(wheelCtx, segments, 0);
   finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
