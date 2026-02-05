@@ -1,11 +1,12 @@
 import 'dotenv/config';
 import { Client, Collection, GatewayIntentBits, Partials } from 'discord.js';
 import { readdirSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
 import logger from './utils/logger.js';
 import { getHttpAgent } from './utils/http.js';
 import * as RedisService from './services/redis.service.js';
+import { isCommandPathAllowed, shouldDescendIntoCommandDir } from './config/command-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -35,17 +36,27 @@ client.commands = new Collection();
 /**
  * Recursively load commands from directory
  */
-async function loadCommands(dir) {
+async function loadCommands(dir, rootDir = dir) {
   const entries = readdirSync(dir);
 
   for (const entry of entries) {
     const fullPath = join(dir, entry);
+    const relPath = relative(rootDir, fullPath).replace(/\\/g, '/');
     const stat = statSync(fullPath);
 
     if (stat.isDirectory()) {
+      if (!shouldDescendIntoCommandDir(relPath)) {
+        logger.debug(`Skipped command dir by policy: ${relPath}`);
+        continue;
+      }
       // Recurse into subdirectory
-      await loadCommands(fullPath);
+      await loadCommands(fullPath, rootDir);
     } else if (entry === 'index.js' || (entry.endsWith('.js') && !entry.startsWith('_'))) {
+      if (!isCommandPathAllowed(relPath)) {
+        logger.debug(`Skipped command by policy: ${relPath}`);
+        continue;
+      }
+
       try {
         const command = await import(`file://${fullPath}`);
 

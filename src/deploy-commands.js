@@ -1,22 +1,32 @@
 import 'dotenv/config';
 import { REST, Routes } from 'discord.js';
 import { readdirSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, relative } from 'path';
 import { fileURLToPath } from 'url';
+import { isCommandPathAllowed, shouldDescendIntoCommandDir } from './config/command-policy.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-async function loadCommandsRecursively(dir) {
+async function loadCommandsRecursively(dir, rootDir = dir) {
   const commands = [];
   const entries = readdirSync(dir);
 
   for (const entry of entries) {
     const fullPath = join(dir, entry);
+    const relPath = relative(rootDir, fullPath).replace(/\\/g, '/');
     const stat = statSync(fullPath);
 
     if (stat.isDirectory()) {
-      commands.push(...await loadCommandsRecursively(fullPath));
+      if (!shouldDescendIntoCommandDir(relPath)) {
+        console.log(`⏭️  Skip dir: ${relPath}`);
+        continue;
+      }
+      commands.push(...await loadCommandsRecursively(fullPath, rootDir));
     } else if (entry === 'index.js' || (entry.endsWith('.js') && !entry.startsWith('_'))) {
+      if (!isCommandPathAllowed(relPath)) {
+        console.log(`⏭️  Skip command: ${relPath}`);
+        continue;
+      }
       try {
         const command = await import(`file://${fullPath}`);
         if (command.default?.data) {
@@ -59,6 +69,9 @@ async function deploy() {
     } else {
       console.log('🌍 Deployed globally (may take up to 1 hour to propagate)');
     }
+
+    // Force exit to avoid open handles from imported modules/HTTP keepalive.
+    process.exit(0);
 
   } catch (error) {
     console.error('❌ Deploy failed:', error);

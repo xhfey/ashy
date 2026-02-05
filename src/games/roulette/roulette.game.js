@@ -193,6 +193,7 @@ export async function startRouletteGame(session, channel) {
     const gameState = {
       sessionId: session.id,
       channel,
+      hostId: session.hostId || null,
       players,
       currentRound: 0,
       phase: 'PLAYING', // PLAYING, SPINNING, KICK_SELECTION, FINAL_ROUND, GAME_END
@@ -1014,6 +1015,27 @@ function cleanupGame(sessionId) {
  */
 export function hasActiveGame(sessionId) {
   return activeGames.has(sessionId);
+}
+
+/**
+ * Find active roulette game by channel ID
+ */
+export function getActiveGameByChannel(channelId) {
+  for (const gameState of activeGames.values()) {
+    if (gameState?.channel?.id === channelId) {
+      return gameState;
+    }
+  }
+  return null;
+}
+
+/**
+ * Cancel active roulette game by channel ID
+ */
+export function cancelRouletteGameByChannel(channelId, reason = 'CANCELLED') {
+  const gameState = getActiveGameByChannel(channelId);
+  if (!gameState) return false;
+  return cancelRouletteGame(gameState.sessionId, reason);
 }
 
 /**

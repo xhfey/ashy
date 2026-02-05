@@ -4,7 +4,6 @@
 
 import { SlashCommandBuilder } from 'discord.js';
 import * as SessionService from '../../services/games/session.service.js';
-import { cancelDiceGame, getActiveGameByChannel } from '../../games/dice/dice.game.js';
 import logger from '../../utils/logger.js';
 
 export default {
@@ -13,22 +12,36 @@ export default {
     .setDescription('إلغاء اللعبة الحالية (المنشئ فقط)'),
 
   async execute(interaction) {
+    const [
+      { cancelChannelEverywhere, cancelSessionEverywhere },
+      { findRuntimeGameByChannel },
+    ] = await Promise.all([
+      import('../../services/games/cancellation.service.js'),
+      import('../../services/games/game-runner.service.js'),
+    ]);
+
     const session = await SessionService.getSessionByChannel(interaction.channelId);
 
     if (!session) {
-      const activeDiceGame = getActiveGameByChannel(interaction.channelId);
-      if (!activeDiceGame) {
+      const runtime = findRuntimeGameByChannel(interaction.channelId);
+      if (!runtime) {
         return interaction.reply({ content: '❌ لا توجد لعبة في هذه القناة', ephemeral: true });
       }
 
-      if (activeDiceGame.hostId && activeDiceGame.hostId !== interaction.user.id) {
+      if (runtime.hostId && runtime.hostId !== interaction.user.id) {
         return interaction.reply({ content: '❌ فقط منشئ اللعبة يمكنه إلغاؤها', ephemeral: true });
       }
 
-      cancelDiceGame(activeDiceGame.sessionId, 'STOP_COMMAND');
+      const result = await cancelChannelEverywhere(interaction.channelId, 'STOP_COMMAND', {
+        hardCleanup: true
+      });
+      if (!result.cancelled) {
+        return interaction.reply({ content: '❌ تعذر إلغاء اللعبة', ephemeral: true });
+      }
+
       await interaction.channel.send({ content: '🚫 | تم إلغاء اللعبة' });
       await interaction.reply({ content: '✅ تم إلغاء اللعبة', ephemeral: true });
-      logger.info(`Dice game ${activeDiceGame.sessionId} stopped by host ${interaction.user.username}`);
+      logger.info(`Runtime game stopped by host ${interaction.user.username} in channel ${interaction.channelId}`);
       return;
     }
 
@@ -37,11 +50,7 @@ export default {
       return interaction.reply({ content: '❌ فقط منشئ اللعبة يمكنه إلغاؤها', ephemeral: true });
     }
 
-    // Cleanup
-    if (session.gameType === 'DICE') {
-      cancelDiceGame(session.id, 'STOP_COMMAND');
-    }
-    await SessionService.cleanupSession(session.id);
+    await cancelSessionEverywhere(session, 'STOP_COMMAND', { hardCleanup: true });
 
     // Try to edit the message
     if (session.messageId) {

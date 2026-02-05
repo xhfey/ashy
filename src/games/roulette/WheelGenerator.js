@@ -684,3 +684,17 @@ export async function generateStaticWheel(players) {
 export function clearAssetsCache() {
   imageCache.clear();
 }
+
+/**
+ * Preload static wheel assets into cache.
+ */
+export async function prewarmWheelAssets() {
+  const assets = [
+    'roulette-wheel-bg.png',
+    'roulette-wheel-frame.png',
+    'roulette-wheel-center.png',
+    'roulette-wheel-pointer.png',
+  ];
+  await Promise.allSettled(assets.map(name => loadAsset(name)));
+  logger.info(`[WheelGenerator] Asset prewarm complete (${assets.length} assets)`);
+}

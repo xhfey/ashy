@@ -1,6 +1,13 @@
 # 🗺️ ASHY BOT - DEVELOPMENT ROADMAP
 
-## Current Status: Phase 6.5 ✅ (Performance Optimization Complete)
+## Current Status: Reliability + Expansion Foundation ✅ (Revised)
+
+### Public Command Model (Current Truth)
+- `/play` is the single public game launcher.
+- `/play` options are generated from the game registry.
+- Only fully implemented games are shown publicly.
+- Unfinished game commands are hidden from command load/deploy.
+- `/stop` is game-agnostic and cancels active game runtime + session state.
 
 ---
 
@@ -79,7 +86,7 @@
 ## Phase 4: First Game - Dice ✅
 **Goal:** Simplest game working end-to-end
 
-- [x] /نرد command
+- [x] Dice available from `/play`
 - [x] Join button, Start button
 - [x] Team-based gameplay (2 teams)
 - [x] Each player rolls with Roll Again/Skip decision
@@ -126,7 +133,7 @@
 ## Phase 6: Roulette ✅
 **Goal:** Animated wheel elimination game
 
-- [x] /روليت command
+- [x] Roulette available from `/play`
 - [x] Slot-based lobby (20 number buttons)
 - [x] Random join option
 - [x] Pre-game shop (Extra Life, Shield)

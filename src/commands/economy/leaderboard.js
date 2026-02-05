@@ -5,9 +5,11 @@
 import { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder } from 'discord.js';
 import prisma from '../../db/prisma.js';
 import { formatNumber } from '../../utils/helpers.js';
-import { GAMES } from '../../config/games.config.js';
+import { GAMES, WEEKLY_REWARDS } from '../../config/games.config.js';
 import config from '../../config/bot.config.js';
 import logger from '../../utils/logger.js';
+
+const ENABLE_CONSISTENCY_CHECK = process.env.LEADERBOARD_CONSISTENCY_CHECK === 'true';
 
 export default {
   data: new SlashCommandBuilder()
@@ -150,9 +152,17 @@ async function buildGameLeaderboard(gameType, client) {
 
   const stats = await prisma.gameStat.findMany({
     where: { gameType },
-    orderBy: { weeklyWins: 'desc' },
+    orderBy: [
+      { weeklyWins: 'desc' },
+      { weeklyGames: 'desc' },
+      { lastPlayed: 'asc' },
+    ],
     take: 10
   });
+
+  if (ENABLE_CONSISTENCY_CHECK) {
+    await checkLeaderboardConsistency(gameType, stats);
+  }
 
   const medals = ['🥇', '🥈', '🥉'];
   let description = '';
@@ -170,15 +180,15 @@ async function buildGameLeaderboard(gameType, client) {
       username = `User ${stat.userId.slice(-4)}`;
     }
 
-    description += `${medal} **${username}** — ${stat.weeklyWins} فوز\n`;
+    description += `${medal} **${username}** — ${stat.weeklyWins} فوز (${stat.weeklyGames} لعبة)\n`;
   }
 
   if (!description) {
     description = 'لا توجد بيانات بعد\nالعب لتظهر هنا!';
   }
 
-  // Weekly rewards info
-  const rewardsInfo = '**جوائز نهاية الأسبوع:**\n🥇 1,500 | 🥈 700 | 🥉 300';
+  // Weekly rewards info (centralized from config)
+  const rewardsInfo = `**جوائز نهاية الأسبوع:**\n🥇 ${formatNumber(WEEKLY_REWARDS[1] || 0)} | 🥈 ${formatNumber(WEEKLY_REWARDS[2] || 0)} | 🥉 ${formatNumber(WEEKLY_REWARDS[3] || 0)}`;
 
   return new EmbedBuilder()
     .setColor(config.colors.primary)
@@ -186,4 +196,40 @@ async function buildGameLeaderboard(gameType, client) {
     .setDescription(description + '\n\n' + rewardsInfo)
     .setFooter({ text: 'يتم إعادة التعيين كل يوم جمعة' })
     .setTimestamp();
+}
+
+async function checkLeaderboardConsistency(gameType, stats) {
+  if (!Array.isArray(stats) || stats.length === 0) return;
+
+  const logicalIssues = stats.filter(
+    s => s.weeklyWins > s.weeklyGames || s.totalWins > s.totalGames
+  );
+  if (logicalIssues.length > 0) {
+    logger.warn(`[Leaderboard] Logical stat mismatch for ${gameType}`, {
+      count: logicalIssues.length,
+      users: logicalIssues.map(s => s.userId),
+    });
+  }
+
+  // Check top rows against transaction history (sampled to limit cost).
+  const sample = stats.slice(0, 3);
+  const txCounts = await Promise.all(sample.map((stat) => prisma.transaction.count({
+    where: {
+      userId: stat.userId,
+      type: 'GAME_WIN',
+      source: gameType,
+    },
+  })));
+
+  for (let i = 0; i < sample.length; i++) {
+    const stat = sample[i];
+    const txCount = txCounts[i];
+    if (txCount < stat.totalWins) {
+      logger.warn(`[Leaderboard] Transaction/stat drift detected for ${gameType}`, {
+        userId: stat.userId,
+        totalWins: stat.totalWins,
+        txCount,
+      });
+    }
+  }
 }

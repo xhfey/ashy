@@ -5,7 +5,7 @@
 
 import { SlashCommandBuilder } from 'discord.js';
 import logger from '../../../utils/logger.js';
-import strings from '../../../localization/ar.json' assert { type: 'json' };
+import strings from '../../../localization/ar.json' with { type: 'json' };
 import { GAMES } from '../../../config/games.config.js';
 
 const game = GAMES.DEATH_WHEEL;

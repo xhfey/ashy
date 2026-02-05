@@ -3,8 +3,7 @@
  */
 
 import * as SessionService from '../services/games/session.service.js';
-import { cancelDiceGame } from '../games/dice/dice.game.js';
-import { cancelRouletteGame } from '../games/roulette/roulette.game.js';
+import { cancelSessionEverywhere } from '../services/games/cancellation.service.js';
 import logger from '../utils/logger.js';
 
 export default {
@@ -14,22 +13,13 @@ export default {
     if (!message.id) return;
 
     try {
-      const result = await SessionService.handleMessageDeleted(message.id);
+      const session = await SessionService.getSessionByMessage(message.id);
 
-      if (result.sessionEnded) {
-        if (result.session?.gameType === 'DICE') {
-          cancelDiceGame(result.session.id, 'MESSAGE_DELETED');
-        } else if (result.session?.gameType === 'ROULETTE') {
-          cancelRouletteGame(result.session.id, 'MESSAGE_DELETED');
-        }
-
-        logger.info(`Game ended due to message deletion`);
-
-        try {
-          await message.channel.send({ content: '🚫 | تم إلغاء اللعبة — تم حذف الرسالة' });
-        } catch (error) {
-          logger.warn('[MessageDelete] Failed to send cancellation message:', error.message);
-        }
+      if (session) {
+        await cancelSessionEverywhere(session, 'MESSAGE_DELETED', { hardCleanup: true });
+        logger.info(`Game ended due to game-message deletion (session ${session.id})`);
+        await message.channel.send({ content: '🚫 | تم إلغاء اللعبة — تم حذف الرسالة' }).catch(() => {});
+        return;
       }
     } catch (e) {
       logger.error('Message delete handler error:', e);

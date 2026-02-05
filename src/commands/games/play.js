@@ -5,9 +5,11 @@
 
 import { SlashCommandBuilder } from 'discord.js';
 import * as SessionService from '../../services/games/session.service.js';
-import * as CountdownService from '../../services/games/countdown.service.js';
 import { buildLobbyEmbed, buildLobbyComponents } from '../../utils/game-embeds.js';
 import logger from '../../utils/logger.js';
+import { getPublicPlayChoices, isPublicGameAvailableInGuild } from '../../games/public-games.js';
+
+const PLAY_CHOICES = getPublicPlayChoices();
 
 export default {
   data: new SlashCommandBuilder()
@@ -18,23 +20,18 @@ export default {
         .setName('game')
         .setDescription('اختر اللعبة')
         .setRequired(true)
-        .addChoices(
-          { name: '🎲 نرد', value: 'DICE' },
-          { name: '✊ حجر ورقة مقص', value: 'RPS' },
-          { name: '🎡 روليت', value: 'ROULETTE' },
-          { name: '⭕ إكس أو', value: 'XO' },
-          { name: '💺 كراسي', value: 'CHAIRS' },
-          { name: '🔫 مافيا', value: 'MAFIA' },
-          { name: '👀 الغميضة', value: 'HIDESEEK' },
-          { name: '📋 نسخة', value: 'REPLICA' },
-          { name: '🌍 خمن الدولة', value: 'GUESS_COUNTRY' },
-          { name: '🔥 إكس أو ساخن', value: 'HOT_XO' },
-          { name: '☠️ عجلة الموت', value: 'DEATH_WHEEL' }
-        )
+        .addChoices(...PLAY_CHOICES)
     ),
 
   async execute(interaction) {
     const gameType = interaction.options.getString('game');
+    const availability = isPublicGameAvailableInGuild(gameType, interaction.guildId);
+    if (!availability.ok) {
+      return interaction.reply({
+        content: '❌ هذه اللعبة غير متاحة حالياً في هذا السيرفر',
+        ephemeral: true
+      });
+    }
 
     const result = await SessionService.createSession({
       gameType,
@@ -63,6 +60,7 @@ export default {
     await SessionService.setMessageId(session.id, message.id);
 
     // Start countdown (in separate service)
+    const CountdownService = await import('../../services/games/countdown.service.js');
     CountdownService.startCountdown(interaction.client, session.id, message);
 
     logger.info(`Game lobby created: ${session.id} (${gameType})`);

@@ -13,6 +13,7 @@ import { generateId } from '../../utils/helpers.js';
 import { GAMES } from '../../config/games.config.js';
 import logger from '../../utils/logger.js';
 import { randomInt } from 'crypto';
+import { auditGameEvent } from './audit.service.js';
 
 const KEYS = {
   SESSION: 'session:',
@@ -21,10 +22,41 @@ const KEYS = {
   MESSAGE: 'message:',
   LOCK: 'lock:',
   WAITING_INDEX: 'waiting_sessions',
+  ACTIVE_INDEX: 'active_sessions',
 };
 
 const SESSION_TTL = 2 * 60 * 60;
 const LOCK_TTL = 2;
+const SESSION_ARCHIVE_TTL = 300;
+
+const ALLOWED_TRANSITIONS = {
+  WAITING: new Set(['ACTIVE', 'CANCELLED']),
+  ACTIVE: new Set(['COMPLETED', 'CANCELLED']),
+  COMPLETED: new Set(),
+  CANCELLED: new Set(),
+};
+
+function canTransition(fromStatus, toStatus) {
+  const allowed = ALLOWED_TRANSITIONS[fromStatus];
+  if (!allowed) return false;
+  return allowed.has(toStatus);
+}
+
+function getTerminalStatusFromReason(reason) {
+  const cancelledReasons = new Set([
+    'CANCELLED',
+    'MESSAGE_DELETED',
+    'NOT_ENOUGH_PLAYERS',
+    'HOST_LEFT',
+    'ALL_PLAYERS_LEFT',
+    'STOP_COMMAND',
+    'NOT_IMPLEMENTED',
+    'RECOVERY_CANCELLED',
+    'ERROR',
+    'NO_WINNER',
+  ]);
+  return cancelledReasons.has(reason) ? 'CANCELLED' : 'COMPLETED';
+}
 
 function getDisplayName(user, member = null) {
   return member?.displayName || user.globalName || user.username;
@@ -81,6 +113,7 @@ export async function createSession({ gameType, guildId, channelId, user, member
   pipeline.setex(KEYS.SESSION + sessionId, SESSION_TTL, JSON.stringify(session));
   pipeline.setex(KEYS.CHANNEL + channelId, SESSION_TTL, sessionId);
   pipeline.sadd(KEYS.WAITING_INDEX, sessionId);
+  pipeline.srem(KEYS.ACTIVE_INDEX, sessionId);
   await pipeline.exec();
 
   logger.info(`Session created: ${sessionId} (${gameType})`);
@@ -286,6 +319,13 @@ export async function leaveSession({ session: initialSession, userId }) {
  */
 export async function startGame(session) {
   if (!session) return { error: 'SESSION_NOT_FOUND' };
+  if (session.status !== 'WAITING') {
+    return {
+      error: 'INVALID_TRANSITION',
+      from: session.status,
+      to: 'ACTIVE',
+    };
+  }
 
   if (session.players.length < session.settings.minPlayers) {
     await cleanupSession(session.id);
@@ -309,9 +349,14 @@ export async function startGame(session) {
   const pipeline = RedisService.redis.pipeline();
   pipeline.setex(KEYS.SESSION + session.id, SESSION_TTL, JSON.stringify(session));
   pipeline.srem(KEYS.WAITING_INDEX, session.id);
+  pipeline.sadd(KEYS.ACTIVE_INDEX, session.id);
   await pipeline.exec();
 
   logger.info(`Game started: ${session.id} with ${session.players.length} players`);
+  auditGameEvent('session_started', session, {
+    minPlayers: session.settings?.minPlayers,
+    maxPlayers: session.settings?.maxPlayers,
+  });
 
   return { session };
 }
@@ -323,10 +368,21 @@ export async function endSession(sessionId, winnerId = null, reason = 'COMPLETED
   const session = await getSession(sessionId);
   if (!session) return { error: 'SESSION_NOT_FOUND' };
 
-  session.status = 'COMPLETED';
-  session.phase = 'COMPLETED';
+  const nextStatus = getTerminalStatusFromReason(reason);
+  if (!canTransition(session.status, nextStatus) && session.status !== nextStatus) {
+    return {
+      error: 'INVALID_TRANSITION',
+      from: session.status,
+      to: nextStatus,
+      session,
+    };
+  }
+
+  session.status = nextStatus;
+  session.phase = nextStatus;
   session.completedAt = Date.now();
   session.winnerId = winnerId;
+  session.gameState = session.gameState || {};
   session.gameState.endReason = reason;
 
   if (winnerId) {
@@ -343,12 +399,14 @@ export async function endSession(sessionId, winnerId = null, reason = 'COMPLETED
 
   // Batch: keep session briefly + delete mappings + remove from index
   const pipeline = RedisService.redis.pipeline();
-  pipeline.setex(KEYS.SESSION + sessionId, 300, JSON.stringify(session));
+  pipeline.setex(KEYS.SESSION + sessionId, SESSION_ARCHIVE_TTL, JSON.stringify(session));
   keysToDelete.forEach(k => pipeline.del(k));
   pipeline.srem(KEYS.WAITING_INDEX, sessionId);
+  pipeline.srem(KEYS.ACTIVE_INDEX, sessionId);
   await pipeline.exec();
 
-  logger.info(`Game ended: ${sessionId} - Reason: ${reason}`);
+  logger.info(`Game ended: ${sessionId} - Status: ${nextStatus} - Reason: ${reason}`);
+  auditGameEvent('session_ended', session, { reason, winnerId });
 
   return { session };
 }
@@ -371,9 +429,11 @@ export async function cleanupSession(sessionId) {
   const pipeline = RedisService.redis.pipeline();
   keysToDelete.forEach(k => pipeline.del(k));
   pipeline.srem(KEYS.WAITING_INDEX, sessionId);
+  pipeline.srem(KEYS.ACTIVE_INDEX, sessionId);
   await pipeline.exec();
 
   logger.info(`Session cleaned: ${sessionId}`);
+  auditGameEvent('session_cleaned', session || { id: sessionId }, {});
   return true;
 }
 
@@ -457,7 +517,7 @@ export async function getAllWaitingSessions() {
     const session = sessions[i];
     if (session && session.status === 'WAITING') {
       validSessions.push(session);
-    } else if (!session) {
+    } else {
       staleIds.push(sessionIds[i]);
     }
   }
@@ -466,6 +526,37 @@ export async function getAllWaitingSessions() {
   if (staleIds.length > 0) {
     const pipeline = RedisService.redis.pipeline();
     staleIds.forEach(id => pipeline.srem(KEYS.WAITING_INDEX, id));
+    pipeline.exec().catch(() => {});
+  }
+
+  return validSessions;
+}
+
+/**
+ * Get all ACTIVE sessions from index.
+ */
+export async function getAllActiveSessions() {
+  const sessionIds = await RedisService.smembers(KEYS.ACTIVE_INDEX);
+  if (sessionIds.length === 0) return [];
+
+  const sessionKeys = sessionIds.map(id => KEYS.SESSION + id);
+  const sessions = await RedisService.getMany(sessionKeys);
+
+  const validSessions = [];
+  const staleIds = [];
+
+  for (let i = 0; i < sessions.length; i++) {
+    const session = sessions[i];
+    if (session && session.status === 'ACTIVE') {
+      validSessions.push(session);
+    } else {
+      staleIds.push(sessionIds[i]);
+    }
+  }
+
+  if (staleIds.length > 0) {
+    const pipeline = RedisService.redis.pipeline();
+    staleIds.forEach(id => pipeline.srem(KEYS.ACTIVE_INDEX, id));
     pipeline.exec().catch(() => {});
   }
 

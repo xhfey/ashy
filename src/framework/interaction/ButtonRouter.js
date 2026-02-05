@@ -110,10 +110,10 @@ class ButtonRouter {
            * Helper to save session and increment UI version
            * Call this after making changes to session state
            */
-          async commit() {
+          commit: async () => {
             session.uiVersion = (session.uiVersion || 0) + 1;
             await this.sessions.save(session);
-          }.bind(this)
+          }
         };
 
         // Call the handler

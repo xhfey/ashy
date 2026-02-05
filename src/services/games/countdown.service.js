@@ -7,7 +7,7 @@
 
 import * as SessionService from './session.service.js';
 import { buildLobbyEmbed, buildLobbyComponents, buildCancelledMessage } from '../../utils/game-embeds.js';
-import { startGameForSession } from './game-runner.service.js';
+import { cancelSessionEverywhere } from './cancellation.service.js';
 import logger from '../../utils/logger.js';
 
 // Track active countdowns
@@ -15,7 +15,7 @@ const activeCountdowns = new Map();
 const MAX_ACTIVE_COUNTDOWNS = 50;
 
 // Periodic monitoring for potential leaks
-setInterval(() => {
+const countdownMonitor = setInterval(() => {
   if (activeCountdowns.size > 20) {
     logger.warn(`[Countdown] High active countdown count: ${activeCountdowns.size}`);
   }
@@ -28,6 +28,19 @@ setInterval(() => {
     activeCountdowns.clear();
   }
 }, 60000);
+
+// Do not keep utility processes alive (deploy/tests/import checks).
+if (typeof countdownMonitor.unref === 'function') {
+  countdownMonitor.unref();
+}
+
+let gameRunnerPromise = null;
+async function getGameRunnerService() {
+  if (!gameRunnerPromise) {
+    gameRunnerPromise = import('./game-runner.service.js');
+  }
+  return gameRunnerPromise;
+}
 
 /**
  * Start countdown for a session
@@ -74,17 +87,36 @@ export function startCountdown(client, sessionId, message) {
         }
 
         if (startResult.session) {
+          let started = false;
           try {
-            const started = await startGameForSession(startResult.session, message.channel);
+            const { startGameForSession } = await getGameRunnerService();
+            started = await startGameForSession(startResult.session, message.channel);
+          } catch (e) {
+            logger.warn('[Countdown] Failed to start game runtime:', e?.message || e);
+          }
+
+          if (!started) {
+            await cancelSessionEverywhere(startResult.session, 'NOT_IMPLEMENTED', { hardCleanup: true });
+            try {
+              await message.edit({
+                content: '🚫 | تم إلغاء اللعبة — هذا النمط غير متاح حالياً',
+                embeds: [],
+                components: []
+              });
+            } catch (e) {
+              logger.warn('[Countdown] Failed to edit not-implemented message:', e?.message || e);
+            }
+            return;
+          }
+
+          try {
             await message.edit({
-              content: started
-                ? `🎮 **بدأت اللعبة!** (${startResult.session.players.length} لاعبين)`
-                : `🎮 **بدأت اللعبة!** (${startResult.session.players.length} لاعبين)\n\n_منطق اللعبة قيد التطوير_`,
+              content: `🎮 **بدأت اللعبة!** (${startResult.session.players.length} لاعبين)`,
               embeds: [],
               components: []
             });
           } catch (e) {
-            logger.warn('[Countdown] Failed to start game or edit message:', e?.message || e);
+            logger.warn('[Countdown] Failed to edit started message:', e?.message || e);
           }
         }
         return;
@@ -100,7 +132,7 @@ export function startCountdown(client, sessionId, message) {
         // Message deleted - cleanup
         logger.debug('[Countdown] Message edit failed, cleaning up:', e?.message || e);
         stopCountdown(sessionId);
-        await SessionService.cleanupSession(sessionId);
+        await cancelSessionEverywhere(session, 'MESSAGE_DELETED', { hardCleanup: true });
       }
 
     } catch (error) {

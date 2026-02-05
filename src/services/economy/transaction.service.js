@@ -113,6 +113,121 @@ export async function addCoins(userId, amount, type, source, metadata = null) {
 }
 
 /**
+ * Award a game win atomically with GameStat updates.
+ * Also supports idempotency by sessionId in metadata.
+ */
+export async function addGameWinWithStats(userId, amount, gameType, metadata = null) {
+  if (amount <= 0) {
+    throw new Error('Amount must be positive');
+  }
+
+  const safeGameType = String(gameType || 'UNKNOWN').toUpperCase();
+  const safeMetadata = metadata && typeof metadata === 'object' ? metadata : {};
+  const sessionId = typeof safeMetadata.sessionId === 'string' ? safeMetadata.sessionId : null;
+
+  try {
+    const result = await prisma.$transaction(async (tx) => {
+      if (sessionId) {
+        const lockKey = `game_win:${safeGameType}:${sessionId}:${userId}`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+
+        const existing = await tx.transaction.findFirst({
+          where: {
+            userId,
+            type: TransactionType.GAME_WIN,
+            source: safeGameType,
+            metadata: { path: ['sessionId'], equals: sessionId },
+          },
+          orderBy: { id: 'desc' },
+        });
+
+        if (existing) {
+          const user = await tx.user.upsert({
+            where: { id: userId },
+            update: {},
+            create: { id: userId },
+          });
+
+          return {
+            duplicate: true,
+            user,
+          };
+        }
+      }
+
+      const user = await tx.user.upsert({
+        where: { id: userId },
+        update: {
+          ashyCoins: { increment: amount },
+          lastActive: new Date()
+        },
+        create: {
+          id: userId,
+          ashyCoins: amount
+        }
+      });
+
+      await tx.transaction.create({
+        data: {
+          userId,
+          amount,
+          type: TransactionType.GAME_WIN,
+          source: safeGameType,
+          metadata: safeMetadata
+        }
+      });
+
+      await tx.gameStat.upsert({
+        where: {
+          userId_gameType: {
+            userId,
+            gameType: safeGameType
+          }
+        },
+        create: {
+          userId,
+          gameType: safeGameType,
+          totalWins: 1,
+          totalGames: 1,
+          totalEarned: amount,
+          weeklyWins: 1,
+          weeklyGames: 1,
+          lastPlayed: new Date()
+        },
+        update: {
+          totalWins: { increment: 1 },
+          totalGames: { increment: 1 },
+          totalEarned: { increment: amount },
+          weeklyWins: { increment: 1 },
+          weeklyGames: { increment: 1 },
+          lastPlayed: new Date()
+        }
+      });
+
+      return {
+        duplicate: false,
+        user,
+      };
+    });
+
+    if (result.duplicate) {
+      logger.warn(`[Transaction] Duplicate GAME_WIN ignored for ${userId} (${safeGameType}, session=${sessionId})`);
+    } else {
+      logger.debug(`Awarded game win ${amount} to ${userId} (${safeGameType}). New balance: ${result.user.ashyCoins}`);
+    }
+
+    return {
+      success: true,
+      newBalance: result.user.ashyCoins,
+      duplicate: result.duplicate
+    };
+  } catch (error) {
+    logger.error('Failed to add game win with stats:', error);
+    throw error;
+  }
+}
+
+/**
  * Remove coins from user (atomic)
  * @param {string} userId
  * @param {number} amount - Must be positive

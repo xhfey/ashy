@@ -1,48 +1,132 @@
 /**
  * Game Runner Service
- * Dispatches to the correct game implementation by type
+ * Dispatches to game implementations through the central registry.
  */
 
-import { startDiceGame, registerDiceHandler } from '../../games/dice/dice.game.js';
-import { startRouletteGame, registerRouletteHandler } from '../../games/roulette/roulette.game.js';
 import logger from '../../utils/logger.js';
+import {
+  getAllGameModules,
+  getGameModule,
+  getRuntimeSnapshot,
+  prewarmAssetsForImplementedGames
+} from '../../games/registry.js';
+import { auditGameEvent } from './audit.service.js';
 
-// Track if handlers have been registered
 let handlersRegistered = false;
 
 /**
- * Register all game handlers with ButtonRouter
- * Should be called once during bot startup
+ * Register all implemented game handlers with ButtonRouter.
  */
 export function registerGameHandlers() {
   if (handlersRegistered) return;
 
-  registerDiceHandler();
-  registerRouletteHandler();
-  // Add more game registrations here as they are implemented
+  for (const mod of getAllGameModules()) {
+    if (!mod.implemented || typeof mod.registerHandlers !== 'function') continue;
+
+    try {
+      mod.registerHandlers();
+    } catch (error) {
+      logger.error(`[GameRunner] Failed to register handler for ${mod.id}:`, error);
+    }
+  }
 
   handlersRegistered = true;
-  logger.info('[GameRunner] All game handlers registered');
+  logger.info('[GameRunner] Game handlers registered via registry');
 }
 
 /**
- * Start the correct game for a session
- * @param {Object} session
- * @param {import('discord.js').TextChannel} channel
- * @returns {Promise<boolean>} true if started, false if not implemented
+ * Start game runtime from session.
+ * Returns false if module is unavailable/unimplemented.
  */
 export async function startGameForSession(session, channel) {
   if (!session || !channel) return false;
 
-  switch (session.gameType) {
-    case 'DICE':
-      await startDiceGame(session, channel);
-      return true;
-    case 'ROULETTE':
-      await startRouletteGame(session, channel);
-      return true;
-    default:
-      logger.info(`Game type not implemented yet: ${session.gameType}`);
-      return false;
+  const mod = getGameModule(session.gameType);
+  if (!mod || !mod.implemented || typeof mod.start !== 'function') {
+    logger.info(`[GameRunner] Game type not implemented: ${session.gameType}`);
+    return false;
   }
+
+  try {
+    await mod.start(session, channel);
+    return true;
+  } catch (error) {
+    logger.error(`[GameRunner] Failed to start ${session.gameType}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Cancel in-memory runtime for a session (if any).
+ * Does not mutate Redis session state.
+ */
+export async function cancelGameRuntime(session, reason = 'CANCELLED') {
+  const sessionId = session?.id;
+  const gameType = session?.gameType;
+  if (!sessionId || !gameType) return false;
+
+  const mod = getGameModule(gameType);
+  if (!mod || typeof mod.stop !== 'function') return false;
+
+  const cancelled = await mod.stop(sessionId, reason);
+  if (cancelled) {
+    auditGameEvent('runtime_cancelled', session, { reason });
+  }
+  return cancelled;
+}
+
+/**
+ * Cancel runtime by channel (fallback path when Redis session is missing).
+ */
+export async function cancelGameRuntimeByChannel(channelId, reason = 'CANCELLED') {
+  for (const mod of getAllGameModules()) {
+    if (!mod.implemented || typeof mod.stopByChannel !== 'function') continue;
+
+    try {
+      const cancelled = await mod.stopByChannel(channelId, reason);
+      if (cancelled) return true;
+    } catch (error) {
+      logger.warn(`[GameRunner] stopByChannel failed for ${mod.id}: ${error.message}`);
+    }
+  }
+  return false;
+}
+
+/**
+ * Inspect in-memory runtime state for a channel.
+ * Useful when Redis session is missing but runtime still exists.
+ */
+export function findRuntimeGameByChannel(channelId) {
+  for (const mod of getAllGameModules()) {
+    if (!mod.implemented || typeof mod.findByChannel !== 'function') continue;
+
+    try {
+      const state = mod.findByChannel(channelId);
+      if (!state) continue;
+
+      return {
+        gameType: mod.id,
+        sessionId: state.sessionId ?? null,
+        hostId: state.hostId ?? null,
+      };
+    } catch (error) {
+      logger.warn(`[GameRunner] findByChannel failed for ${mod.id}: ${error.message}`);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Snapshot of active game runtimes for diagnostics.
+ */
+export function getGameRuntimeSnapshot() {
+  return getRuntimeSnapshot();
+}
+
+/**
+ * Prewarm heavy game assets on startup.
+ */
+export async function prewarmGameAssets() {
+  await prewarmAssetsForImplementedGames();
 }

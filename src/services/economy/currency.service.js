@@ -32,10 +32,9 @@ export async function awardGameWin(userId, amount, gameType, gameData = {}) {
     throw new UserNotEligibleError(eligibility.reason, eligibility.details);
   }
 
-  const result = await TransactionService.addCoins(
+  const result = await TransactionService.addGameWinWithStats(
     userId,
     amount,
-    TransactionService.TransactionType.GAME_WIN,
     gameType,
     gameData
   );
@@ -43,7 +42,8 @@ export async function awardGameWin(userId, amount, gameType, gameData = {}) {
   return {
     success: true,
     newBalance: result.newBalance,
-    reward: amount
+    reward: amount,
+    duplicate: result.duplicate === true
   };
 }
 

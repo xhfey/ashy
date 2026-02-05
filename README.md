@@ -1,14 +1,17 @@
 # 🎮 Ashy Bot - آشي بوت
 
-Arabic Discord gaming bot with 11 multiplayer games and virtual economy.
+Arabic Discord gaming bot with a `/play` game hub and production-focused reliability tooling.
 
 ## ✨ Features
 
-- 🎮 11 multiplayer games
+- 🎮 `/play` hub (public games are loaded dynamically from registry)
+- 🎲 Fully implemented: Dice + Roulette
+- 🧪 Unfinished games remain hidden until fully playable
 - 💰 Virtual currency (Ashy Coins)
 - 🏆 Weekly leaderboards
 - 🛡️ Anti-abuse system
-- 🎯 Tournament mode
+- 🩺 Admin diagnostics command for runtime health
+- 🚩 Guild-based feature flags for staged game rollout
 - 🎡 Premium Roulette: AAA-quality GIF generator with 2x supersampling, physics-based easing, motion blur, and 20-slot lobby.
 - 🎲 Dice rolls use crypto RNG with fair 1/6 distribution and team-based gameplay.
 - ⚡ Instant-feedback buttons for faster-feeling gameplay (dice decisions + lobby actions).
@@ -80,27 +83,23 @@ See `CLAUDE.md` for complete documentation and `docs/lessons_learned.md` for dev
 
 | Command | Description |
 |---------|-------------|
+| /play | Start a game from the hub |
+| /stop | Stop the current game (host only) |
 | /رصيد | Check your coin balance |
 | /تحويل | Transfer coins to another user |
 | /لوحة-الصدارة | View leaderboards |
-| /نرد | Play Dice game |
-| /روليت | Play Roulette game (Elimination) |
-| /حجر-ورقة-مقص | Play Rock Paper Scissors |
-| ... | And 8 more games! |
+| /diagnostics | Admin health snapshot (sessions, latency, memory, timers) |
 
 ## 📈 Development Status
 
 See `ROADMAP.md` for current progress.
 
-Current Phase: **Phase 6.5 (Performance Optimization) - Completed** ✅
-- All core economy services active
-- Dice & Roulette games fully playable
-- Anti-abuse system enabled
-- **Performance optimizations applied:**
-  - Event loop yielding in GIF/image generation (2-4s → <1s blocking)
-  - Smart caching with auto-cleanup (prevents memory leaks)
-  - Performance monitoring with thresholds
-  - Game state cleanup with TTL and max size limits
+Current focus: **Reliability + Expansion Foundation** ✅
+- `/play` is the only public start path
+- Runtime startup recovery handles WAITING + stale ACTIVE sessions
+- Unified cancellation path used by `/stop`, countdown, and startup recovery
+- Atomic game reward + `GameStat` updates with idempotency guards
+- Weekly leaderboard reset + payout job enabled
 
 ## 🤖 For AI Developers
 

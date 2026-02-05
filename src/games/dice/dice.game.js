@@ -1003,6 +1003,13 @@ export function hasActiveGame(sessionId) {
 }
 
 /**
+ * Get active dice games count
+ */
+export function getActiveGamesCount() {
+  return activeGames.size;
+}
+
+/**
  * Cancel active dice game
  */
 export function cancelDiceGame(sessionId, reason = 'MESSAGE_DELETED') {

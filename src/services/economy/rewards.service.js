@@ -7,6 +7,7 @@ import { randomInt } from 'crypto';
 import logger from '../../utils/logger.js';
 import * as CurrencyService from './currency.service.js';
 import { sessionManager } from '../../framework/index.js';
+import { WEEKLY_REWARDS } from '../../config/games.config.js';
 
 const BASE_REWARD_DEFAULT = 4;
 const BASE_REWARD_4P = 13;
@@ -128,7 +129,8 @@ export async function awardGameWinners(payload = {}) {
       paidIds: Array.from(paidSet),
       failedIds: pendingIds
     };
-    session.payoutDone = true;
+    // Keep payout open until all winners are paid successfully.
+    session.payoutDone = false;
     try {
       await sessionManager.save(session);
     } catch (error) {
@@ -176,9 +178,7 @@ export async function awardGameWinners(payload = {}) {
       paidIds: Array.from(paidSet),
       failedIds: Array.from(failedSet)
     };
-    if (failedSet.size === 0) {
-      session.payoutDone = true;
-    }
+    session.payoutDone = failedSet.size === 0;
     await sessionManager.save(session);
   }
 
@@ -201,15 +201,6 @@ export function calculateTournamentPrize(entryFee, playerCount, housePercent = 1
 }
 
 /**
- * Weekly leaderboard rewards (top 3 per game)
- */
-export const WEEKLY_REWARDS = {
-  1: 1500,  // 1st place
-  2: 700,   // 2nd place
-  3: 300    // 3rd place
-};
-
-/**
  * Get weekly reward for placement
  * @param {number} placement - 1, 2, or 3
  * @returns {number} - Reward amount
@@ -217,3 +208,5 @@ export const WEEKLY_REWARDS = {
 export function getWeeklyReward(placement) {
   return WEEKLY_REWARDS[placement] || 0;
 }
+
+export { WEEKLY_REWARDS };

@@ -338,6 +338,15 @@ function downsampleCanvas(sourceCanvas, targetWidth, targetHeight) {
   return finalCanvas;
 }
 
+/**
+ * Preload all dice assets into memory cache.
+ */
+export async function prewarmDiceAssets() {
+  const uniquePaths = new Set(Object.values(DICE_IMAGES).filter(Boolean));
+  await Promise.allSettled([...uniquePaths].map(p => loadCachedImage(p)));
+  logger.info(`[DiceImages] Asset prewarm complete (${uniquePaths.size} assets)`);
+}
+
 // ==================== EXPORTS ====================
 
 export async function generateDiceImage(value) {
