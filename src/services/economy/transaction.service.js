@@ -18,6 +18,7 @@ export const TransactionType = {
   PERK_PURCHASE: 'PERK_PURCHASE',
   TOURNAMENT_ENTRY: 'TOURNAMENT_ENTRY',
   TOURNAMENT_WIN: 'TOURNAMENT_WIN',
+  GAME_TIE: 'GAME_TIE',
   ADMIN_ADD: 'ADMIN_ADD',
   ADMIN_REMOVE: 'ADMIN_REMOVE'
 };
@@ -224,6 +225,90 @@ export async function addGameWinWithStats(userId, amount, gameType, metadata = n
   } catch (error) {
     logger.error('Failed to add game win with stats:', error);
     throw error;
+  }
+}
+
+/**
+ * Record a game loss or tie (no coins, just GameStat update).
+ * Supports sessionId-based idempotency to prevent double-counting on retries.
+ *
+ * @param {string} userId
+ * @param {string} gameType
+ * @param {'LOSS'|'TIE'} result
+ * @param {object|null} metadata - Should include sessionId for idempotency
+ */
+export async function recordGameResult(userId, gameType, result, metadata = null) {
+  const safeGameType = String(gameType || 'UNKNOWN').toUpperCase();
+  const safeMetadata = metadata && typeof metadata === 'object' ? metadata : {};
+  const sessionId = typeof safeMetadata.sessionId === 'string' ? safeMetadata.sessionId : null;
+  const isLoss = result === 'LOSS';
+  const txType = isLoss ? TransactionType.GAME_LOSS : TransactionType.GAME_TIE;
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      // Idempotency: skip if already recorded for this session
+      if (sessionId) {
+        const lockKey = `game_result:${safeGameType}:${sessionId}:${userId}`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${lockKey}))`;
+
+        const existing = await tx.transaction.findFirst({
+          where: {
+            userId,
+            type: txType,
+            source: safeGameType,
+            metadata: { path: ['sessionId'], equals: sessionId },
+          },
+          orderBy: { id: 'desc' },
+        });
+
+        if (existing) {
+          logger.debug(`[Transaction] Duplicate ${txType} ignored for ${userId} (${safeGameType}, session=${sessionId})`);
+          return;
+        }
+      }
+
+      // Ensure user exists
+      await tx.user.upsert({
+        where: { id: userId },
+        update: { lastActive: new Date() },
+        create: { id: userId },
+      });
+
+      // Zero-amount transaction for audit trail
+      await tx.transaction.create({
+        data: {
+          userId,
+          amount: 0,
+          type: txType,
+          source: safeGameType,
+          metadata: safeMetadata,
+        },
+      });
+
+      // Update game stats
+      await tx.gameStat.upsert({
+        where: {
+          userId_gameType: { userId, gameType: safeGameType },
+        },
+        create: {
+          userId,
+          gameType: safeGameType,
+          totalLosses: isLoss ? 1 : 0,
+          totalGames: 1,
+          weeklyGames: 1,
+          lastPlayed: new Date(),
+        },
+        update: {
+          ...(isLoss ? { totalLosses: { increment: 1 } } : {}),
+          totalGames: { increment: 1 },
+          weeklyGames: { increment: 1 },
+          lastPlayed: new Date(),
+        },
+      });
+    });
+  } catch (error) {
+    logger.error(`Failed to record game ${result}:`, error);
+    // Non-critical: don't throw, stats recording shouldn't break game flow
   }
 }
 

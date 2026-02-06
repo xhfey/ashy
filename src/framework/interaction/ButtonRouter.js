@@ -7,12 +7,30 @@
  * - Re-fetch session after lock (gets fresh state)
  * - Stale click detection (via token/uiVersion)
  * - Route to game handler
- * - Release lock (fire-and-forget)
+ * - Release lock
  */
 
 import { codec } from './CustomIdCodec.js';
-import * as RedisService from '../../services/redis.service.js';
 import logger from '../../utils/logger.js';
+
+const lockMap = new Map(); // lockKey -> expiresAt(ms)
+const LOCK_TTL_MS = 2 * 1000;
+
+function tryAcquireLock(lockKey, ttlMs = LOCK_TTL_MS) {
+  const now = Date.now();
+  const expiresAt = lockMap.get(lockKey);
+
+  if (Number.isFinite(expiresAt) && expiresAt > now) {
+    return false;
+  }
+
+  lockMap.set(lockKey, now + ttlMs);
+  return true;
+}
+
+function releaseLock(lockKey) {
+  lockMap.delete(lockKey);
+}
 
 class ButtonRouter {
   constructor(sessionManager) {
@@ -49,7 +67,7 @@ class ButtonRouter {
 
       // 3. Acquire lock
       const lockKey = `game:lock:${sessionId}`;
-      const gotLock = await RedisService.acquireLock(lockKey, 2);
+      const gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
 
       if (!gotLock) {
         logger.debug(`[ButtonRouter] Lock contention on ${sessionId}`);
@@ -120,8 +138,8 @@ class ButtonRouter {
         await gameHandler.onAction(ctx);
 
       } finally {
-        // 8. Always release lock (fire-and-forget)
-        RedisService.releaseLock(lockKey);
+        // 8. Always release lock
+        releaseLock(lockKey);
       }
 
       return true; // Handled

@@ -14,6 +14,7 @@ import { randomInt } from 'crypto';
 import * as SessionService from '../../services/games/session.service.js';
 import { buttonRouter, codec } from '../../framework/index.js';
 import { awardGameWinners } from '../../services/economy/rewards.service.js';
+import { recordGameResult } from '../../services/economy/transaction.service.js';
 import {
   rollDie,
   performSecondRoll,
@@ -254,10 +255,16 @@ async function handleBlockTargetFromCtx(ctx, gameState, targetId) {
   await applyBlock(gameState, currentPlayer, target, teamLetter, false, false);
 }
 
-function handleGameError(gameState, error, context) {
+async function handleGameError(gameState, error, context) {
   logger.error(`Dice game error (${context}):`, error);
   if (!gameState) return;
   cancelDiceGame(gameState.sessionId, 'ERROR');
+  // Clean up session to unblock channel/players
+  try {
+    await SessionService.endSession(gameState.sessionId, null, 'ERROR');
+  } catch (e) {
+    logger.warn('[Dice] Failed to end session after error:', e.message);
+  }
 }
 
 function buildDecisionButtons(gameState, selected = null, lock = false) {
@@ -358,6 +365,8 @@ async function announceTeams(gameState) {
   const announcementImage = await generateTeamAnnouncement({
     teamA: gameState.teamA,
     teamB: gameState.teamB,
+    teamAMultiplier: gameState.teamAMultiplier,
+    teamBMultiplier: gameState.teamBMultiplier,
   });
 
   const attachment = new AttachmentBuilder(announcementImage, { name: 'teams.png' });
@@ -552,7 +561,7 @@ export async function handleSkip(gameState, player, message, wasTimeout = false)
         components: [],
       });
     } catch (e) {
-      console.error('Failed to edit skip message:', e);
+      logger.warn('[Dice] Failed to edit skip message:', e.message);
     }
 
     if (wasTimeout) {
@@ -635,9 +644,30 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
   const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
   const teamLetter = gameState.phase === 'TEAM_A' ? 'B' : 'A';
   const blockedSet = new Set(gameState.blockedNextRound[teamLetter] || []);
-  let availableTargets = oppositeTeam.filter(p => !blockedSet.has(p.userId));
+  const availableTargets = oppositeTeam.filter(p => !blockedSet.has(p.userId));
+
+  // All opponents already blocked — block is wasted, just keep first roll score
   if (availableTargets.length === 0) {
-    availableTargets = oppositeTeam;
+    const turnScore = applyMultiplier(firstRoll, player.scoreMultiplier);
+    const idx = gameState.round - 1;
+    player.roundScores[idx] = (player.roundScores[idx] || 0) + turnScore;
+    player.totalScore += turnScore;
+
+    player.roundMeta[idx] = {
+      firstRoll: gameState.turnState.firstRoll,
+      outcomeType: 'BLOCK_WASTED',
+      outcomeDisplay: null,
+      turnScore,
+    };
+
+    const channel = interaction.channel || gameState.channel;
+    await channel.send({
+      content: `<@${player.userId}>\n🎲 ${MESSAGES.GOT_BLOCK}\n⚠️ جميع لاعبي الفريق الآخر ممنوعون بالفعل!\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+      files: [attachment],
+    });
+
+    await advanceToNextTurn(gameState);
+    return;
   }
 
   // Build session-like object for codec
@@ -693,9 +723,8 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
         const targetPool = availableTargets.length > 0 ? availableTargets : oppositeTeam;
         const randomTarget = targetPool[randomInt(targetPool.length)];
         try {
-          const blockMessage = await gameState.channel.messages.fetch(gameState.messageId);
           // PLAIN TEXT - NO EMBED
-          await blockMessage.edit({
+          await gameState.currentMessage.edit({
             content: `⏱️ ${MESSAGES.TIMEOUT_AUTO_BLOCK}\n✅ ${MESSAGES.BLOCKED_PLAYER(`<@${randomTarget.userId}>`)}`,
             components: [],
           });
@@ -940,18 +969,45 @@ async function endGame(gameState) {
     files: [attachment],
   });
 
-  // Distribute rewards
+  // Distribute rewards and record stats
+  const totalPlayers = gameState.teamA.length + gameState.teamB.length;
+  const statsMetadata = { sessionId: gameState.sessionId, playerCount: totalPlayers, roundsPlayed: TOTAL_ROUNDS };
+
   if (winner !== 'TIE') {
     const winnerIds = winner === 'A'
       ? gameState.teamA.map(p => p.userId)
       : gameState.teamB.map(p => p.userId);
-    await awardGameWinners({
+    const loserIds = winner === 'A'
+      ? gameState.teamB.map(p => p.userId)
+      : gameState.teamA.map(p => p.userId);
+
+    const rewardResult = await awardGameWinners({
       gameType: 'DICE',
       sessionId: gameState.sessionId,
       winnerIds,
-      playerCount: gameState.teamA.length + gameState.teamB.length,
+      playerCount: totalPlayers,
       roundsPlayed: TOTAL_ROUNDS
     });
+
+    if (rewardResult?.reward > 0) {
+      await gameState.channel.send({
+        content: `🪙 كل فائز حصل على **${rewardResult.reward}** عملة آشي!`,
+      });
+    }
+
+    // Record losses for losing team
+    await Promise.allSettled(
+      loserIds.map(id => recordGameResult(id, 'DICE', 'LOSS', statsMetadata))
+    );
+  } else {
+    // Tie: record participation for all players (no win/loss)
+    const allPlayerIds = [
+      ...gameState.teamA.map(p => p.userId),
+      ...gameState.teamB.map(p => p.userId),
+    ];
+    await Promise.allSettled(
+      allPlayerIds.map(id => recordGameResult(id, 'DICE', 'TIE', statsMetadata))
+    );
   }
 
   // Cleanup

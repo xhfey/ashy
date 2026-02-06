@@ -9,10 +9,7 @@
  */
 
 import * as SessionService from '../../services/games/session.service.js';
-import * as RedisService from '../../services/redis.service.js';
 import logger from '../../utils/logger.js';
-
-const SESSION_KEY_PREFIX = 'session:';
 const DEFAULT_TTL = 3600; // 1 hour
 
 class SessionManager {
@@ -89,11 +86,10 @@ class SessionManager {
    * @param {string} sessionId
    */
   async touch(sessionId) {
-    const key = SESSION_KEY_PREFIX + sessionId;
-    try {
-      await RedisService.redis.expire(key, this.defaultTTL);
-    } catch (err) {
-      logger.debug(`[SessionManager] Failed to touch TTL for ${sessionId}`);
+    // In-memory sessions do not use TTL extension.
+    // Keep method for API compatibility with callers.
+    if (!sessionId) {
+      logger.debug('[SessionManager] touch called without sessionId');
     }
   }
 

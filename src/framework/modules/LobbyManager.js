@@ -9,9 +9,27 @@
  * - Resume lobbies on bot restart
  */
 
-import * as RedisService from '../../services/redis.service.js';
 import { codec } from '../interaction/CustomIdCodec.js';
 import logger from '../../utils/logger.js';
+
+const lockMap = new Map(); // lockKey -> expiresAt(ms)
+const LOCK_TTL_MS = 2 * 1000;
+
+function tryAcquireLock(lockKey, ttlMs = LOCK_TTL_MS) {
+  const now = Date.now();
+  const expiresAt = lockMap.get(lockKey);
+
+  if (Number.isFinite(expiresAt) && expiresAt > now) {
+    return false;
+  }
+
+  lockMap.set(lockKey, now + ttlMs);
+  return true;
+}
+
+function releaseLock(lockKey) {
+  lockMap.delete(lockKey);
+}
 
 class LobbyManager {
   constructor(sessionManager) {
@@ -137,7 +155,7 @@ class LobbyManager {
    */
   async handleJoin(sessionId, user, member = null) {
     const lockKey = `game:lock:${sessionId}`;
-    const gotLock = await RedisService.acquireLock(lockKey, 2);
+    const gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
 
     if (!gotLock) {
       return { error: 'BUSY_TRY_AGAIN' };
@@ -171,7 +189,7 @@ class LobbyManager {
       return { success: true, session: result.session };
 
     } finally {
-      RedisService.releaseLock(lockKey);
+      releaseLock(lockKey);
     }
   }
 
@@ -183,7 +201,7 @@ class LobbyManager {
    */
   async handleLeave(sessionId, userId) {
     const lockKey = `game:lock:${sessionId}`;
-    const gotLock = await RedisService.acquireLock(lockKey, 2);
+    const gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
 
     if (!gotLock) {
       return { error: 'BUSY_TRY_AGAIN' };
@@ -224,7 +242,7 @@ class LobbyManager {
       return { success: true, session: result.session };
 
     } finally {
-      RedisService.releaseLock(lockKey);
+      releaseLock(lockKey);
     }
   }
 

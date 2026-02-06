@@ -43,17 +43,17 @@ describe('Dice Better Luck behavior', () => {
     expect(mockRandomInt).toHaveBeenNthCalledWith(2, 6);
   });
 
-  test('performSecondRoll normal outcome uses weighted roll with Better Luck', () => {
+  test('performSecondRoll normal outcome uses fair roll even with Better Luck (no double-dip)', () => {
     randomQueue.push(0); // randomInt(100): force NORMAL outcome
-    randomQueue.push(999_999); // randomInt(1_000_000): weighted picker near top -> 6
+    randomQueue.push(4); // randomInt(6): fair roll -> 5
 
     const result = DiceMechanics.performSecondRoll(2, true);
 
     expect(result.type).toBe('NORMAL');
-    expect(result.value).toBe(6);
-    expect(result.display).toBe('6');
+    expect(result.value).toBe(5);
+    expect(result.display).toBe('5');
     expect(mockRandomInt).toHaveBeenNthCalledWith(1, 100);
-    expect(mockRandomInt).toHaveBeenNthCalledWith(2, 1_000_000);
+    expect(mockRandomInt).toHaveBeenNthCalledWith(2, 6); // fair die, not weighted
   });
 
   test('rollDie with Better Luck respects weighted domain boundaries', () => {

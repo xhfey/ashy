@@ -26,16 +26,6 @@ export const SECOND_ROLL_SPECIAL_OUTCOMES = [
   SECOND_ROLL_OUTCOMES.MINUS_4,
 ];
 
-// Normal roll weights (no perk)
-export const NORMAL_ROLL_WEIGHTS = {
-  1: 16.67,
-  2: 16.67,
-  3: 16.67,
-  4: 16.67,
-  5: 16.67,
-  6: 16.65,
-};
-
 // Better Luck perk weights (biased toward higher)
 export const BETTER_LUCK_WEIGHTS = {
   1: 10,

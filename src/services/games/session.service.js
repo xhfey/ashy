@@ -1,33 +1,32 @@
 /**
- * Game Session Service - FIXED VERSION
+ * Game Session Service - In-memory runtime storage
  *
- * Fixes applied:
- * - Lock logic properly re-acquires after wait
- * - Destructured param reassignment fixed
- * - Lock release is fire-and-forget
- * - Uses SADD/SMEMBERS instead of KEYS for session index
+ * Design:
+ * - Live sessions are kept in process memory for low-latency gameplay.
+ * - Sessions do NOT survive bot restarts (intentional).
+ * - Ended sessions are archived briefly for payout/idempotency reads.
  */
 
-import * as RedisService from '../redis.service.js';
-import { generateId } from '../../utils/helpers.js';
-import { GAMES } from '../../config/games.config.js';
-import logger from '../../utils/logger.js';
 import { randomInt } from 'crypto';
+import { GAMES } from '../../config/games.config.js';
+import { generateId } from '../../utils/helpers.js';
+import logger from '../../utils/logger.js';
 import { auditGameEvent } from './audit.service.js';
 
-const KEYS = {
-  SESSION: 'session:',
-  CHANNEL: 'channel:',
-  PLAYER: 'player:',
-  MESSAGE: 'message:',
-  LOCK: 'lock:',
-  WAITING_INDEX: 'waiting_sessions',
-  ACTIVE_INDEX: 'active_sessions',
-};
+const LOCK_TTL_MS = 2 * 1000;
+const LOCK_RETRY_DELAY_MS = 150;
+const SESSION_ARCHIVE_TTL_MS = 300 * 1000;
 
-const SESSION_TTL = 2 * 60 * 60;
-const LOCK_TTL = 2;
-const SESSION_ARCHIVE_TTL = 300;
+const liveSessions = new Map(); // sessionId -> session
+const archivedSessions = new Map(); // sessionId -> { session, expiresAt, timeout }
+
+const channelIndex = new Map(); // channelId -> sessionId
+const playerIndex = new Map(); // userId -> sessionId
+const messageIndex = new Map(); // messageId -> sessionId
+const waitingIndex = new Set(); // sessionId
+const activeIndex = new Set(); // sessionId
+
+const sessionLocks = new Map(); // lockKey -> expiresAt(ms)
 
 const ALLOWED_TRANSITIONS = {
   WAITING: new Set(['ACTIVE', 'CANCELLED']),
@@ -35,6 +34,15 @@ const ALLOWED_TRANSITIONS = {
   COMPLETED: new Set(),
   CANCELLED: new Set(),
 };
+
+function deepClone(value) {
+  if (value === null || value === undefined) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function canTransition(fromStatus, toStatus) {
   const allowed = ALLOWED_TRANSITIONS[fromStatus];
@@ -62,16 +70,178 @@ function getDisplayName(user, member = null) {
   return member?.displayName || user.globalName || user.username;
 }
 
+function getLiveSessionUnsafe(sessionId) {
+  return liveSessions.get(sessionId) || null;
+}
+
+function getArchivedSessionUnsafe(sessionId) {
+  const archived = archivedSessions.get(sessionId);
+  if (!archived) return null;
+
+  if (Date.now() >= archived.expiresAt) {
+    if (archived.timeout) clearTimeout(archived.timeout);
+    archivedSessions.delete(sessionId);
+    return null;
+  }
+
+  return archived.session;
+}
+
+function readSessionUnsafe(sessionId) {
+  return getLiveSessionUnsafe(sessionId) || getArchivedSessionUnsafe(sessionId);
+}
+
+function releaseLock(lockKey) {
+  sessionLocks.delete(lockKey);
+}
+
+function tryAcquireLock(lockKey, ttlMs = LOCK_TTL_MS) {
+  const now = Date.now();
+  const expiresAt = sessionLocks.get(lockKey);
+
+  if (Number.isFinite(expiresAt) && expiresAt > now) {
+    return false;
+  }
+
+  sessionLocks.set(lockKey, now + ttlMs);
+  return true;
+}
+
+function clearArchivedSession(sessionId) {
+  const archived = archivedSessions.get(sessionId);
+  if (!archived) return;
+
+  if (archived.timeout) clearTimeout(archived.timeout);
+  archivedSessions.delete(sessionId);
+}
+
+function archiveSession(session) {
+  if (!session?.id) return;
+
+  clearArchivedSession(session.id);
+
+  const archivedCopy = deepClone(session);
+  const timeout = setTimeout(() => {
+    archivedSessions.delete(session.id);
+  }, SESSION_ARCHIVE_TTL_MS);
+
+  if (typeof timeout.unref === 'function') {
+    timeout.unref();
+  }
+
+  archivedSessions.set(session.id, {
+    session: archivedCopy,
+    expiresAt: Date.now() + SESSION_ARCHIVE_TTL_MS,
+    timeout,
+  });
+}
+
+function deleteMapEntriesBySessionId(index, sessionId, keepKey = null) {
+  for (const [key, value] of index.entries()) {
+    if (value !== sessionId) continue;
+    if (keepKey !== null && key === keepKey) continue;
+    index.delete(key);
+  }
+}
+
+function syncIndexesForLiveSession(session) {
+  const { id: sessionId, channelId, messageId } = session;
+
+  deleteMapEntriesBySessionId(channelIndex, sessionId, channelId ?? null);
+  if (channelId) {
+    channelIndex.set(channelId, sessionId);
+  }
+
+  deleteMapEntriesBySessionId(messageIndex, sessionId, messageId ?? null);
+  if (messageId) {
+    messageIndex.set(messageId, sessionId);
+  }
+
+  deleteMapEntriesBySessionId(playerIndex, sessionId, null);
+  for (const player of session.players || []) {
+    if (player?.userId) {
+      playerIndex.set(player.userId, sessionId);
+    }
+  }
+
+  waitingIndex.delete(sessionId);
+  activeIndex.delete(sessionId);
+
+  if (session.status === 'WAITING') {
+    waitingIndex.add(sessionId);
+  } else if (session.status === 'ACTIVE') {
+    activeIndex.add(sessionId);
+  }
+}
+
+function removeIndexesForSession(session) {
+  if (!session?.id) return;
+
+  waitingIndex.delete(session.id);
+  activeIndex.delete(session.id);
+
+  if (session.channelId) {
+    const mapped = channelIndex.get(session.channelId);
+    if (mapped === session.id) {
+      channelIndex.delete(session.channelId);
+    }
+  }
+
+  if (session.messageId) {
+    const mapped = messageIndex.get(session.messageId);
+    if (mapped === session.id) {
+      messageIndex.delete(session.messageId);
+    }
+  }
+
+  for (const player of session.players || []) {
+    if (!player?.userId) continue;
+    const mapped = playerIndex.get(player.userId);
+    if (mapped === session.id) {
+      playerIndex.delete(player.userId);
+    }
+  }
+}
+
+function cleanupStaleIndexReferences(sessionId) {
+  waitingIndex.delete(sessionId);
+  activeIndex.delete(sessionId);
+
+  deleteMapEntriesBySessionId(channelIndex, sessionId, null);
+  deleteMapEntriesBySessionId(messageIndex, sessionId, null);
+  deleteMapEntriesBySessionId(playerIndex, sessionId, null);
+}
+
+function persistLiveSessionUnsafe(session) {
+  const copy = deepClone(session);
+  liveSessions.set(copy.id, copy);
+  syncIndexesForLiveSession(copy);
+  return copy;
+}
+
+const archiveSweepInterval = setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, archived] of archivedSessions.entries()) {
+    if (archived.expiresAt <= now) {
+      if (archived.timeout) clearTimeout(archived.timeout);
+      archivedSessions.delete(sessionId);
+    }
+  }
+}, 60_000);
+
+if (typeof archiveSweepInterval.unref === 'function') {
+  archiveSweepInterval.unref();
+}
+
 /**
- * Create session - OPTIMIZED
+ * Create session
  */
 export async function createSession({ gameType, guildId, channelId, user, member = null }) {
-  // Check existing
-  const existingSessionId = await RedisService.get(KEYS.CHANNEL + channelId);
+  const existingSessionId = channelIndex.get(channelId);
   if (existingSessionId) {
-    const existing = await RedisService.get(KEYS.SESSION + existingSessionId);
+    const existing = readSessionUnsafe(existingSessionId);
     if (existing && ['WAITING', 'ACTIVE'].includes(existing.status)) {
-      return { error: 'CHANNEL_HAS_GAME', existingSession: existing };
+      return { error: 'CHANNEL_HAS_GAME', existingSession: deepClone(existing) };
     }
     await cleanupSession(existingSessionId);
   }
@@ -104,268 +274,252 @@ export async function createSession({ gameType, guildId, channelId, user, member
       minPlayers: gameConfig.minPlayers,
       maxPlayers: gameConfig.maxPlayers,
       lobbyType: gameConfig.lobbyType,
-      countdownSeconds
-    }
+      countdownSeconds,
+    },
   };
 
-  // Batch: save session + channel mapping + add to waiting index
-  const pipeline = RedisService.redis.pipeline();
-  pipeline.setex(KEYS.SESSION + sessionId, SESSION_TTL, JSON.stringify(session));
-  pipeline.setex(KEYS.CHANNEL + channelId, SESSION_TTL, sessionId);
-  pipeline.sadd(KEYS.WAITING_INDEX, sessionId);
-  pipeline.srem(KEYS.ACTIVE_INDEX, sessionId);
-  await pipeline.exec();
+  persistLiveSessionUnsafe(session);
 
   logger.info(`Session created: ${sessionId} (${gameType})`);
 
-  return session;
+  return deepClone(session);
 }
 
 /**
- * Get session by ID
+ * Get session by ID (live or archived)
  */
 export async function getSession(sessionId) {
-  return RedisService.get(KEYS.SESSION + sessionId);
+  return deepClone(readSessionUnsafe(sessionId));
 }
 
 /**
  * Get session by channel
  */
 export async function getSessionByChannel(channelId) {
-  const sessionId = await RedisService.get(KEYS.CHANNEL + channelId);
+  const sessionId = channelIndex.get(channelId);
   if (!sessionId) return null;
-  return RedisService.get(KEYS.SESSION + sessionId);
+  const session = readSessionUnsafe(sessionId);
+  if (!session) {
+    channelIndex.delete(channelId);
+    return null;
+  }
+  return deepClone(session);
 }
 
 /**
  * Get session by message
  */
 export async function getSessionByMessage(messageId) {
-  const sessionId = await RedisService.get(KEYS.MESSAGE + messageId);
+  const sessionId = messageIndex.get(messageId);
   if (!sessionId) return null;
-  return RedisService.get(KEYS.SESSION + sessionId);
+  const session = readSessionUnsafe(sessionId);
+  if (!session) {
+    messageIndex.delete(messageId);
+    return null;
+  }
+  return deepClone(session);
 }
 
 /**
  * Set message ID
  */
 export async function setMessageId(sessionId, messageId) {
-  const session = await getSession(sessionId);
+  const session = getLiveSessionUnsafe(sessionId);
   if (!session) return null;
 
   session.messageId = messageId;
+  const persisted = persistLiveSessionUnsafe(session);
 
-  await RedisService.setMany([
-    { key: KEYS.SESSION + sessionId, value: session },
-    { key: KEYS.MESSAGE + messageId, value: sessionId }
-  ], SESSION_TTL);
-
-  return session;
+  return deepClone(persisted);
 }
 
 /**
- * Save session (persist updated session object)
+ * Save session
  */
 export async function saveSession(session) {
   if (!session?.id) return null;
-  await RedisService.set(KEYS.SESSION + session.id, session, SESSION_TTL);
-  return session;
+
+  if (session.status === 'WAITING' || session.status === 'ACTIVE') {
+    const persisted = persistLiveSessionUnsafe(session);
+    return deepClone(persisted);
+  }
+
+  // Terminal state: keep only in short-lived archive.
+  liveSessions.delete(session.id);
+  cleanupStaleIndexReferences(session.id);
+  archiveSession(session);
+  return deepClone(session);
 }
 
 /**
- * Join session - FIXED VERSION
- *
- * Fixes:
- * - Properly handles lock acquisition retry
- * - Uses let for session variable (not destructured reassignment)
- * - Fire-and-forget lock release
+ * Join session
  */
 export async function joinSession({ session: initialSession, user, member = null, preferredSlot = null }) {
-  // Use let so we can reassign after lock
   let session = initialSession;
 
-  // Quick validations (no Redis needed)
   if (!session) return { error: 'SESSION_NOT_FOUND' };
   if (session.status !== 'WAITING') return { error: 'GAME_ALREADY_STARTED' };
   if (session.players.length >= session.settings.maxPlayers) return { error: 'GAME_FULL' };
-  if (session.players.some(p => p.userId === user.id)) return { error: 'ALREADY_IN_GAME' };
+  if (session.players.some((p) => p.userId === user.id)) return { error: 'ALREADY_IN_GAME' };
 
-  const lockKey = KEYS.LOCK + session.id;
+  const lockKey = `lock:${session.id}`;
 
-  // Try to acquire lock
-  let gotLock = await RedisService.acquireLock(lockKey, LOCK_TTL);
-
+  let gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
   if (!gotLock) {
-    // Wait and retry ONCE
-    await new Promise(r => setTimeout(r, 150));
-    gotLock = await RedisService.acquireLock(lockKey, LOCK_TTL);
-
+    await sleep(LOCK_RETRY_DELAY_MS);
+    gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
     if (!gotLock) {
-      // Still can't get lock, tell user to retry
       return { error: 'BUSY_TRY_AGAIN' };
     }
   }
 
-  // We have the lock! Re-fetch session to get fresh state
-  session = await getSession(session.id);
+  try {
+    session = getLiveSessionUnsafe(session.id);
 
-  // Re-validate after getting fresh state
-  if (!session) {
-    RedisService.releaseLock(lockKey);
-    return { error: 'SESSION_NOT_FOUND' };
-  }
-  if (session.status !== 'WAITING') {
-    RedisService.releaseLock(lockKey);
-    return { error: 'GAME_ALREADY_STARTED' };
-  }
-  if (session.players.length >= session.settings.maxPlayers) {
-    RedisService.releaseLock(lockKey);
-    return { error: 'GAME_FULL' };
-  }
-  if (session.players.some(p => p.userId === user.id)) {
-    RedisService.releaseLock(lockKey);
-    return { error: 'ALREADY_IN_GAME' };
-  }
+    if (!session) return { error: 'SESSION_NOT_FOUND' };
+    if (session.status !== 'WAITING') return { error: 'GAME_ALREADY_STARTED' };
+    if (session.players.length >= session.settings.maxPlayers) return { error: 'GAME_FULL' };
+    if (session.players.some((p) => p.userId === user.id)) return { error: 'ALREADY_IN_GAME' };
 
-  // Check if player is in another game (parallelized query)
-  const existingSessionId = await RedisService.get(KEYS.PLAYER + user.id);
-  if (existingSessionId && existingSessionId !== session.id) {
-    // Only fetch existing session if there's a potential conflict
-    const existingSession = await RedisService.get(KEYS.SESSION + existingSessionId);
-    if (existingSession && ['WAITING', 'ACTIVE'].includes(existingSession.status)) {
-      RedisService.releaseLock(lockKey);
-      return { error: 'PLAYER_IN_OTHER_GAME' };
-    }
-    // If session doesn't exist or is completed, clean up stale player mapping
-    if (!existingSession) {
-      RedisService.redis.del(KEYS.PLAYER + user.id).catch(() => {});
-    }
-  }
-
-  // Determine slot number
-  const usedSlots = new Set(session.players.map(p => p.slotNumber));
-  let slotNumber;
-
-  if (session.settings.lobbyType === 'SLOTS') {
-    if (preferredSlot && !usedSlots.has(preferredSlot) && preferredSlot >= 1 && preferredSlot <= session.settings.maxPlayers) {
-      slotNumber = preferredSlot;
-    } else {
-      // True random from empty slots
-      const emptySlots = [];
-      for (let i = 1; i <= session.settings.maxPlayers; i++) {
-        if (!usedSlots.has(i)) emptySlots.push(i);
+    const existingSessionId = playerIndex.get(user.id);
+    if (existingSessionId && existingSessionId !== session.id) {
+      const existingSession = readSessionUnsafe(existingSessionId);
+      if (existingSession && ['WAITING', 'ACTIVE'].includes(existingSession.status)) {
+        return { error: 'PLAYER_IN_OTHER_GAME' };
       }
-      slotNumber = emptySlots[randomInt(emptySlots.length)];
+      if (!existingSession || ['COMPLETED', 'CANCELLED'].includes(existingSession.status)) {
+        playerIndex.delete(user.id);
+      }
     }
-  } else {
-    // SIMPLE: sequential
-    slotNumber = session.players.length + 1;
+
+    const usedSlots = new Set(session.players.map((p) => p.slotNumber));
+    let slotNumber;
+
+    if (session.settings.lobbyType === 'SLOTS') {
+      if (
+        preferredSlot &&
+        !usedSlots.has(preferredSlot) &&
+        preferredSlot >= 1 &&
+        preferredSlot <= session.settings.maxPlayers
+      ) {
+        slotNumber = preferredSlot;
+      } else {
+        const emptySlots = [];
+        for (let i = 1; i <= session.settings.maxPlayers; i += 1) {
+          if (!usedSlots.has(i)) emptySlots.push(i);
+        }
+        slotNumber = emptySlots[randomInt(emptySlots.length)];
+      }
+    } else {
+      slotNumber = session.players.length + 1;
+    }
+
+    session.players.push({
+      userId: user.id,
+      username: user.username,
+      displayName: getDisplayName(user, member),
+      avatarURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
+      slotNumber,
+      status: 'waiting',
+      perks: [],
+      joinedAt: Date.now(),
+    });
+
+    session.players.sort((a, b) => a.slotNumber - b.slotNumber);
+    persistLiveSessionUnsafe(session);
+
+    logger.debug(`${user.username} joined ${session.id} (slot ${slotNumber})`);
+
+    return { session: deepClone(session), slotNumber };
+  } finally {
+    releaseLock(lockKey);
   }
-
-  // Add player
-  session.players.push({
-    userId: user.id,
-    username: user.username,
-    displayName: getDisplayName(user, member),
-    avatarURL: user.displayAvatarURL({ dynamic: true, size: 128 }),
-    slotNumber,
-    status: 'waiting',
-    perks: [],
-    joinedAt: Date.now()
-  });
-
-  session.players.sort((a, b) => a.slotNumber - b.slotNumber);
-
-  // Batch write: session + player mapping
-  await RedisService.setMany([
-    { key: KEYS.SESSION + session.id, value: session },
-    { key: KEYS.PLAYER + user.id, value: session.id }
-  ], SESSION_TTL);
-
-  // Release lock (fire and forget - no await!)
-  RedisService.releaseLock(lockKey);
-
-  logger.debug(`${user.username} joined ${session.id} (slot ${slotNumber})`);
-
-  return { session, slotNumber };
 }
 
 /**
- * Leave session - FIXED
+ * Leave session
  */
 export async function leaveSession({ session: initialSession, userId }) {
   let session = initialSession;
-
   if (!session) return { error: 'SESSION_NOT_FOUND' };
 
-  const playerIndex = session.players.findIndex(p => p.userId === userId);
-  if (playerIndex === -1) return { error: 'NOT_IN_GAME' };
+  const lockKey = `lock:${session.id}`;
+  const gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
+  if (!gotLock) {
+    return { error: 'BUSY_TRY_AGAIN' };
+  }
 
-  session.players.splice(playerIndex, 1);
+  try {
+    session = getLiveSessionUnsafe(session.id);
+    if (!session) return { error: 'SESSION_NOT_FOUND' };
 
-  // Batch: update session + remove player mapping
-  const pipeline = RedisService.redis.pipeline();
-  pipeline.setex(KEYS.SESSION + session.id, SESSION_TTL, JSON.stringify(session));
-  pipeline.del(KEYS.PLAYER + userId);
-  await pipeline.exec();
+    const playerIndexInSession = session.players.findIndex((p) => p.userId === userId);
+    if (playerIndexInSession === -1) return { error: 'NOT_IN_GAME' };
 
-  logger.debug(`${userId} left ${session.id}`);
+    session.players.splice(playerIndexInSession, 1);
+    persistLiveSessionUnsafe(session);
 
-  return { session };
+    logger.debug(`${userId} left ${session.id}`);
+
+    return { session: deepClone(session) };
+  } finally {
+    releaseLock(lockKey);
+  }
 }
 
 /**
  * Start game
  */
 export async function startGame(session) {
-  if (!session) return { error: 'SESSION_NOT_FOUND' };
-  if (session.status !== 'WAITING') {
+  if (!session?.id) return { error: 'SESSION_NOT_FOUND' };
+
+  const liveSession = getLiveSessionUnsafe(session.id);
+  if (!liveSession) return { error: 'SESSION_NOT_FOUND' };
+
+  if (liveSession.status !== 'WAITING') {
     return {
       error: 'INVALID_TRANSITION',
-      from: session.status,
+      from: liveSession.status,
       to: 'ACTIVE',
     };
   }
 
-  if (session.players.length < session.settings.minPlayers) {
-    await cleanupSession(session.id);
+  if (liveSession.players.length < liveSession.settings.minPlayers) {
+    await cleanupSession(liveSession.id);
     return {
       error: 'NOT_ENOUGH_PLAYERS',
-      required: session.settings.minPlayers,
-      current: session.players.length
+      required: liveSession.settings.minPlayers,
+      current: liveSession.players.length,
     };
   }
 
-  session.status = 'ACTIVE';
-  session.phase = 'ACTIVE';
-  if (!Number.isFinite(session.uiVersion)) {
-    session.uiVersion = 0;
+  liveSession.status = 'ACTIVE';
+  liveSession.phase = 'ACTIVE';
+  if (!Number.isFinite(liveSession.uiVersion)) {
+    liveSession.uiVersion = 0;
   }
-  session.startedAt = Date.now();
-  session.countdownEndsAt = null;
-  session.players.forEach(p => { p.status = 'playing'; });
-
-  // Update session + remove from waiting index
-  const pipeline = RedisService.redis.pipeline();
-  pipeline.setex(KEYS.SESSION + session.id, SESSION_TTL, JSON.stringify(session));
-  pipeline.srem(KEYS.WAITING_INDEX, session.id);
-  pipeline.sadd(KEYS.ACTIVE_INDEX, session.id);
-  await pipeline.exec();
-
-  logger.info(`Game started: ${session.id} with ${session.players.length} players`);
-  auditGameEvent('session_started', session, {
-    minPlayers: session.settings?.minPlayers,
-    maxPlayers: session.settings?.maxPlayers,
+  liveSession.startedAt = Date.now();
+  liveSession.countdownEndsAt = null;
+  liveSession.players.forEach((player) => {
+    player.status = 'playing';
   });
 
-  return { session };
+  persistLiveSessionUnsafe(liveSession);
+
+  logger.info(`Game started: ${liveSession.id} with ${liveSession.players.length} players`);
+  auditGameEvent('session_started', liveSession, {
+    minPlayers: liveSession.settings?.minPlayers,
+    maxPlayers: liveSession.settings?.maxPlayers,
+  });
+
+  return { session: deepClone(liveSession) };
 }
 
 /**
  * End session
  */
 export async function endSession(sessionId, winnerId = null, reason = 'COMPLETED') {
-  const session = await getSession(sessionId);
+  const session = readSessionUnsafe(sessionId);
   if (!session) return { error: 'SESSION_NOT_FOUND' };
 
   const nextStatus = getTerminalStatusFromReason(reason);
@@ -374,7 +528,7 @@ export async function endSession(sessionId, winnerId = null, reason = 'COMPLETED
       error: 'INVALID_TRANSITION',
       from: session.status,
       to: nextStatus,
-      session,
+      session: deepClone(session),
     };
   }
 
@@ -386,51 +540,40 @@ export async function endSession(sessionId, winnerId = null, reason = 'COMPLETED
   session.gameState.endReason = reason;
 
   if (winnerId) {
-    const winner = session.players.find(p => p.userId === winnerId);
+    const winner = session.players.find((p) => p.userId === winnerId);
     if (winner) winner.status = 'winner';
   }
 
-  // Collect keys to delete
-  const keysToDelete = [
-    KEYS.CHANNEL + session.channelId,
-    ...(session.messageId ? [KEYS.MESSAGE + session.messageId] : []),
-    ...session.players.map(p => KEYS.PLAYER + p.userId)
-  ];
+  const liveSession = getLiveSessionUnsafe(sessionId);
+  if (liveSession) {
+    removeIndexesForSession(liveSession);
+  }
 
-  // Batch: keep session briefly + delete mappings + remove from index
-  const pipeline = RedisService.redis.pipeline();
-  pipeline.setex(KEYS.SESSION + sessionId, SESSION_ARCHIVE_TTL, JSON.stringify(session));
-  keysToDelete.forEach(k => pipeline.del(k));
-  pipeline.srem(KEYS.WAITING_INDEX, sessionId);
-  pipeline.srem(KEYS.ACTIVE_INDEX, sessionId);
-  await pipeline.exec();
+  liveSessions.delete(sessionId);
+  cleanupStaleIndexReferences(sessionId);
+  archiveSession(session);
 
   logger.info(`Game ended: ${sessionId} - Status: ${nextStatus} - Reason: ${reason}`);
   auditGameEvent('session_ended', session, { reason, winnerId });
 
-  return { session };
+  return { session: deepClone(session) };
 }
 
 /**
- * Cleanup session - OPTIMIZED batch delete
+ * Cleanup session
  */
 export async function cleanupSession(sessionId) {
-  const session = await getSession(sessionId);
+  const liveSession = getLiveSessionUnsafe(sessionId);
+  const archivedSession = getArchivedSessionUnsafe(sessionId);
+  const session = liveSession || archivedSession;
 
-  const keysToDelete = [KEYS.SESSION + sessionId];
-
-  if (session) {
-    keysToDelete.push(KEYS.CHANNEL + session.channelId);
-    if (session.messageId) keysToDelete.push(KEYS.MESSAGE + session.messageId);
-    session.players.forEach(p => keysToDelete.push(KEYS.PLAYER + p.userId));
+  if (liveSession) {
+    removeIndexesForSession(liveSession);
   }
 
-  // Batch delete + remove from index
-  const pipeline = RedisService.redis.pipeline();
-  keysToDelete.forEach(k => pipeline.del(k));
-  pipeline.srem(KEYS.WAITING_INDEX, sessionId);
-  pipeline.srem(KEYS.ACTIVE_INDEX, sessionId);
-  await pipeline.exec();
+  liveSessions.delete(sessionId);
+  clearArchivedSession(sessionId);
+  cleanupStaleIndexReferences(sessionId);
 
   logger.info(`Session cleaned: ${sessionId}`);
   auditGameEvent('session_cleaned', session || { id: sessionId }, {});
@@ -441,7 +584,7 @@ export async function cleanupSession(sessionId) {
  * Force clear channel
  */
 export async function forceClearChannel(channelId) {
-  const sessionId = await RedisService.get(KEYS.CHANNEL + channelId);
+  const sessionId = channelIndex.get(channelId);
   if (sessionId) {
     await cleanupSession(sessionId);
     return true;
@@ -453,17 +596,20 @@ export async function forceClearChannel(channelId) {
  * Add perk to player
  */
 export async function addPlayerPerk(session, userId, perkId) {
-  if (!session) return null;
+  if (!session?.id) return null;
 
-  const player = session.players.find(p => p.userId === userId);
+  const liveSession = getLiveSessionUnsafe(session.id);
+  if (!liveSession) return null;
+
+  const player = liveSession.players.find((p) => p.userId === userId);
   if (!player) return null;
 
   if (!player.perks.includes(perkId)) {
     player.perks.push(perkId);
   }
 
-  await RedisService.set(KEYS.SESSION + session.id, session, SESSION_TTL);
-  return session;
+  persistLiveSessionUnsafe(liveSession);
+  return deepClone(liveSession);
 }
 
 /**
@@ -484,65 +630,46 @@ export function isCountdownExpired(session) {
 }
 
 /**
- * Get all waiting sessions - uses SMEMBERS instead of KEYS
- * Much faster and safer at scale!
+ * Get all waiting sessions
  */
 export async function getAllWaitingSessions() {
-  const sessionIds = await RedisService.smembers(KEYS.WAITING_INDEX);
-  if (sessionIds.length === 0) return [];
-
-  const sessionKeys = sessionIds.map(id => KEYS.SESSION + id);
-  const sessions = await RedisService.getMany(sessionKeys);
-
-  // Filter out nulls and non-waiting sessions (cleanup stale index entries)
   const validSessions = [];
   const staleIds = [];
 
-  for (let i = 0; i < sessions.length; i++) {
-    const session = sessions[i];
+  for (const sessionId of waitingIndex) {
+    const session = getLiveSessionUnsafe(sessionId);
     if (session && session.status === 'WAITING') {
-      validSessions.push(session);
+      validSessions.push(deepClone(session));
     } else {
-      staleIds.push(sessionIds[i]);
+      staleIds.push(sessionId);
     }
   }
 
-  // Clean up stale index entries (fire and forget)
-  if (staleIds.length > 0) {
-    const pipeline = RedisService.redis.pipeline();
-    staleIds.forEach(id => pipeline.srem(KEYS.WAITING_INDEX, id));
-    pipeline.exec().catch(() => {});
+  for (const staleId of staleIds) {
+    waitingIndex.delete(staleId);
   }
 
   return validSessions;
 }
 
 /**
- * Get all ACTIVE sessions from index.
+ * Get all active sessions
  */
 export async function getAllActiveSessions() {
-  const sessionIds = await RedisService.smembers(KEYS.ACTIVE_INDEX);
-  if (sessionIds.length === 0) return [];
-
-  const sessionKeys = sessionIds.map(id => KEYS.SESSION + id);
-  const sessions = await RedisService.getMany(sessionKeys);
-
   const validSessions = [];
   const staleIds = [];
 
-  for (let i = 0; i < sessions.length; i++) {
-    const session = sessions[i];
+  for (const sessionId of activeIndex) {
+    const session = getLiveSessionUnsafe(sessionId);
     if (session && session.status === 'ACTIVE') {
-      validSessions.push(session);
+      validSessions.push(deepClone(session));
     } else {
-      staleIds.push(sessionIds[i]);
+      staleIds.push(sessionId);
     }
   }
 
-  if (staleIds.length > 0) {
-    const pipeline = RedisService.redis.pipeline();
-    staleIds.forEach(id => pipeline.srem(KEYS.ACTIVE_INDEX, id));
-    pipeline.exec().catch(() => {});
+  for (const staleId of staleIds) {
+    activeIndex.delete(staleId);
   }
 
   return validSessions;

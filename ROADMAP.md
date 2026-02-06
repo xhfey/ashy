@@ -243,6 +243,42 @@
 
 ---
 
+## Phase 6.6: Dice Deep Analysis & Fixes ✅
+**Goal:** Comprehensive audit of dice game system — fix all bugs, improve fairness and UX
+
+### Bugs Fixed
+- [x] **BUG 1**: Loss/tie stats never recorded — added `recordGameResult()` with idempotency guards
+- [x] **BUG 2**: Error-caused cancellations left orphaned sessions blocking channels — `handleGameError` now calls `SessionService.endSession()`
+- [x] **BUG 3**: `console.error` bypassing logger in dice.game.js — changed to `logger.warn`
+- [x] **BUG 4**: Dead `NORMAL_ROLL_WEIGHTS` constant removed from dice.constants.js
+- [x] **BUG 5**: Image cache interval preventing graceful shutdown — added `.unref()`
+- [x] **BUG 6**: Block fallback let players waste blocks on already-blocked opponents — added `BLOCK_WASTED` handling
+- [x] **BUG 7**: Block timeout fetched message from API unnecessarily — now uses cached `gameState.currentMessage`
+
+### Design Improvements
+- [x] **DESIGN 2**: Team A always got extra player with odd counts — now randomized 50/50
+- [x] **DESIGN 3**: Round summary showed first roll dice for NORMAL outcomes — now shows actual second roll value
+- [x] **DESIGN 4**: Winners never saw coin reward — now displays "كل فائز حصل على X عملة آشي"
+- [x] **DESIGN 5**: Better Luck perk double-dipped on first + second roll — second roll now always fair
+- [x] **DESIGN 7**: Team announcement image missing multiplier — now shows ×1.5 badge on smaller team
+
+### Additional Fixes
+- [x] Added `GAME_TIE` to `TransactionType` enum (was using string literal)
+- [x] Fixed `console.error` → `logger.error` in dice.images.js `loadCachedImage`
+- [x] Updated Better Luck test to verify no double-dip behavior
+
+**Files Modified:**
+- `src/games/dice/dice.game.js` — Error cleanup, stats recording, reward display, block fixes
+- `src/games/dice/dice.mechanics.js` — Team randomization, Better Luck fix
+- `src/games/dice/dice.images.js` — Round summary dice, multiplier badge, logger fix, `.unref()`
+- `src/games/dice/dice.constants.js` — Removed dead code
+- `src/services/economy/transaction.service.js` — Added `recordGameResult()`, `GAME_TIE` enum
+- `tests/integration/dice-better-luck.test.js` — Updated for no-double-dip behavior
+
+**Test:** 27/27 passing ✅
+
+---
+
 ## Phase 7-12: Remaining Games ⬜
 - [ ] Phase 7: XO (Tic-tac-toe tournament)
 - [ ] Phase 8: Chairs (Musical chairs)
@@ -298,6 +334,10 @@
 | 2026-01-29 | Performance monitoring infrastructure | Proactive detection of bottlenecks before users notice |
 | 2026-01-29 | Auto-cleanup caches with TTL | Memory leaks from long-running bots can cause crashes |
 | 2026-01-29 | gameStates bounded Map | Unbounded Maps are a common memory leak pattern |
+| 2026-02-06 | Better Luck only on first roll | Double-dipping (first + second) was too strong an advantage |
+| 2026-02-06 | Randomize extra player team | Always giving Team A the extra player was predictable/unfair |
+| 2026-02-06 | Show reward amount to winners | Players should see how many coins they earned |
+| 2026-02-06 | In-memory sessions (no Redis) | Simpler architecture; players just restart games after bot restart |
 
 ---
 
@@ -306,15 +346,19 @@
 _None currently_
 
 ## Technical Debt ⚠️
-- [ ] **Session Recovery**: Game state is saved to Redis, but bot restart doesn't automatically re-hydrate active game timers (kick selection will hang until manual cleanup).
 - [ ] **Magic Numbers**: Gameplay constants (timeouts, rewards) are scattered in `constants.js` and `index.js`. Should be centralized.
 - [ ] **Type Safety**: Interaction between Game Logic and Session Service relies on implicit contracts (e.g. `perks` array structure).
+- [ ] **Non-Cancellable Delays**: `delay()` promises can't be cancelled; cancelled games rely on `isGameCancelled` checks after each delay.
 
 ## Technical Debt Resolved ✅
 - [x] **Event Loop Blocking**: GIF/image generation now yields every 2 frames with `setImmediate`
 - [x] **Memory Leaks**: All imageCache Maps auto-clear every 6 hours
 - [x] **Unbounded Maps**: gameStates limited to 100 entries with 2h TTL
 - [x] **Missing Monitoring**: Performance tracking infrastructure added (`performance.js`)
+- [x] **Session Recovery**: Migrated from Redis to in-memory sessions — players just restart games after bot restart
+- [x] **Loss/Tie Stats**: `totalLosses`, `totalGames`, `weeklyGames` now tracked for all players (not just winners)
+- [x] **Orphaned Sessions**: Error-caused cancellations now properly call `SessionService.endSession()`
+- [x] **Graceful Shutdown**: Image cache interval `.unref()`'d so it doesn't block process exit
 
 ---
 

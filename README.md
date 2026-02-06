@@ -68,8 +68,8 @@ See `CLAUDE.md` for complete documentation and `docs/lessons_learned.md` for dev
 
 ### Common Issues
 1. **"Game already in progress"**
-   - **Cause**: Bot restart left a session in memory/Redis.
-   - **Fix**: Wait 2-3 minutes for the session TTL to expire, or use admin command (if implemented).
+   - **Cause**: Bot restart left a stale session in memory.
+   - **Fix**: Restart the bot — in-memory sessions are cleared automatically. Players can just start a new game.
 
 2. **Perks not saving**
    - **Cause**: Redis serialization issue (Fixed in v1.1).
@@ -100,9 +100,10 @@ See `ROADMAP.md` for current progress.
 
 Current focus: **Reliability + Expansion Foundation** ✅
 - `/play` is the only public start path
-- Runtime startup recovery handles WAITING + stale ACTIVE sessions
-- Unified cancellation path used by `/stop`, countdown, and startup recovery
+- In-memory session management with proper cleanup on errors and cancellations
+- Unified cancellation path used by `/stop`, countdown, and error recovery
 - Atomic game reward + `GameStat` updates with idempotency guards
+- Full win/loss/tie stats tracking for all players
 - Weekly leaderboard reset + payout job enabled
 
 ## 🤖 For AI Developers

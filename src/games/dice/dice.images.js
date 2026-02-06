@@ -17,12 +17,13 @@ const imageCache = new Map();
 // Clear image cache every 6 hours to prevent memory leaks
 const CACHE_CLEANUP_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
 
-setInterval(() => {
+const cacheCleanupTimer = setInterval(() => {
   if (imageCache.size > 0) {
     logger.info(`[DiceImages] Clearing image cache (${imageCache.size} images)`);
     imageCache.clear();
   }
 }, CACHE_CLEANUP_INTERVAL);
+if (typeof cacheCleanupTimer.unref === 'function') cacheCleanupTimer.unref();
 
 // Register Custom Fonts
 try {
@@ -98,7 +99,7 @@ async function loadCachedImage(imagePath) {
     imageCache.set(imagePath, img);
     return img;
   } catch (error) {
-    console.error(`Failed to load image: ${imagePath}`, error.message);
+    logger.error(`Failed to load image: ${imagePath}`, error.message);
     return null;
   }
 }
@@ -438,7 +439,7 @@ export async function generateRoundSummary(roundData) {
 }
 
 export async function generateTeamAnnouncement(gameData) {
-  const { teamA, teamB } = gameData;
+  const { teamA, teamB, teamAMultiplier = 1.0, teamBMultiplier = 1.0 } = gameData;
 
   // Render at 2x scale
   const renderCanvas = createCanvas(LAYOUT.WIDTH * RENDER_SCALE, LAYOUT.HEIGHT * RENDER_SCALE);
@@ -473,6 +474,24 @@ export async function generateTeamAnnouncement(gameData) {
     glowBlur: 15,
     glow: `${COLORS.TEAM_B}99`
   });
+
+  // Multiplier badges for uneven teams
+  if (teamAMultiplier > 1.0) {
+    drawGlowyText(ctx, `×${teamAMultiplier.toFixed(1)}`, LAYOUT.SCORE_TEAM_A.x, LAYOUT.SCORE_TEAM_A.y + 55, {
+      font: `700 32px ${FONTS.SCORES}`,
+      color: '#00FF88',
+      glowBlur: 10,
+      glow: 'rgba(0,255,136,0.4)'
+    });
+  }
+  if (teamBMultiplier > 1.0) {
+    drawGlowyText(ctx, `×${teamBMultiplier.toFixed(1)}`, LAYOUT.SCORE_TEAM_B.x, LAYOUT.SCORE_TEAM_B.y + 55, {
+      font: `700 32px ${FONTS.SCORES}`,
+      color: '#00FF88',
+      glowBlur: 10,
+      glow: 'rgba(0,255,136,0.4)'
+    });
+  }
 
   // VS
   drawGlowyText(ctx, 'VS', LAYOUT.WIDTH / 2, LAYOUT.ROUND_TEXT.y, {
@@ -565,22 +584,25 @@ async function drawPlayerSlot(ctx, player, slot, round, align, teamColor, isTopS
     });
   }
 
-  // Dice Result
+  // Dice Result — show the roll that determined the score
   if (meta && meta.firstRoll) {
-    const diceImg = await loadCachedImage(getDiceImagePath(meta.firstRoll));
+    const displayRoll = (meta.outcomeType === 'NORMAL' && meta.secondRollValue)
+      ? meta.secondRollValue
+      : meta.firstRoll;
+    const diceImg = await loadCachedImage(getDiceImagePath(displayRoll));
     const x = slot.dice.x - LAYOUT.DICE_SIZE / 2;
     const y = slot.dice.y - LAYOUT.DICE_SIZE / 2;
 
     // Special outcome gets glowing ring
     const specialIconKey = getSpecialIconKey(meta);
     if (specialIconKey) {
-      const glowColor = getContextualGlow(meta.firstRoll, meta);
+      const glowColor = getContextualGlow(displayRoll, meta);
       drawGlowingRing(ctx, slot.dice.x, slot.dice.y, LAYOUT.DICE_SIZE / 2 + 5, glowColor);
     }
 
     if (diceImg) {
       if (ENABLE_GLOW) {
-        const diceGlow = getContextualGlow(meta.firstRoll, meta);
+        const diceGlow = getContextualGlow(displayRoll, meta);
         ctx.save();
         ctx.shadowColor = diceGlow;
         ctx.shadowBlur = 15;
@@ -590,7 +612,7 @@ async function drawPlayerSlot(ctx, player, slot, round, align, teamColor, isTopS
         ctx.drawImage(diceImg, x, y, LAYOUT.DICE_SIZE, LAYOUT.DICE_SIZE);
       }
     } else {
-      drawGlowyText(ctx, String(meta.firstRoll), slot.dice.x, slot.dice.y, {
+      drawGlowyText(ctx, String(displayRoll), slot.dice.x, slot.dice.y, {
         font: `700 48px ${FONTS.SCORES}`
       });
     }

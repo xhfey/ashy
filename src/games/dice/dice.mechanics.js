@@ -94,8 +94,8 @@ export function performSecondRoll(firstRoll, hasBetterLuck = false) {
 
     case SECOND_ROLL_OUTCOMES.NORMAL:
     default:
-      // Roll a new 1-6 (affected by Better Luck)
-      const newRoll = rollDie(hasBetterLuck);
+      // Roll a new 1-6 (always fair — Better Luck only applies to first roll)
+      const newRoll = rollDie(false);
       return {
         type: 'NORMAL',
         value: newRoll,
@@ -152,7 +152,7 @@ export function assignTeams(players) {
   const teamA = [];
   const teamB = [];
 
-  // Distribute evenly (or A gets extra if odd)
+  // Distribute evenly
   shuffled.forEach((player, index) => {
     if (index % 2 === 0) {
       teamA.push(player);
@@ -160,6 +160,11 @@ export function assignTeams(players) {
       teamB.push(player);
     }
   });
+
+  // Randomize which team gets the extra player (if odd count)
+  if (teamA.length !== teamB.length && randomInt(2) === 0) {
+    return { teamA: teamB, teamB: teamA };
+  }
 
   return { teamA, teamB };
 }
