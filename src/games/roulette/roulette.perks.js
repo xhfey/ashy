@@ -152,10 +152,10 @@ export function getOwnedPerks(players, userId) {
 
 /**
  * Process kick attempt - handles shield and extra life logic
- * 
+ *
  * ⚠️ IMPORTANT: This function MUTATES the players array!
  * It will consume perks (remove them from player.perks) as they are used.
- * 
+ *
  * This is the core perk interaction logic:
  *
  * 1. Target has SHIELD:
@@ -169,6 +169,8 @@ export function getOwnedPerks(players, userId) {
  *    - Extra life consumed, target survives
  *
  * 3. No perks: target eliminated
+ *
+ * FIX CRITICAL 4: Now atomic - if error occurs, perks are restored
  *
  * @param {Array} players - Players array from game state (MUTATED!)
  * @param {string} kickerId - ID of player doing the kick
@@ -197,40 +199,58 @@ export function processKick(players, kickerId, targetId) {
     return result;
   }
 
-  // Check if target has shield
-  if (hasActivePerk(players, targetId, 'SHIELD')) {
-    usePerk(players, targetId, 'SHIELD'); // Mutates players!
-    result.shieldUsed = true;
+  // CRITICAL FIX: Track consumed perks for rollback on error
+  const consumedPerks = [];
 
-    // Shield reflects the kick back to the attacker
-    // But attacker might have extra life!
-    if (hasActivePerk(players, kickerId, 'EXTRA_LIFE')) {
-      usePerk(players, kickerId, 'EXTRA_LIFE'); // Mutates players!
-      result.extraLifeUsed = true;
-      // Kicker survives with extra life, no one eliminated
-      result.reason = 'extra_life_saved';
-    } else {
-      // Kicker gets eliminated by reflected kick
-      result.eliminated = kickerId;
-      result.reason = 'shield_reflect';
+  try {
+    // Check if target has shield
+    if (hasActivePerk(players, targetId, 'SHIELD')) {
+      usePerk(players, targetId, 'SHIELD'); // Mutates players!
+      consumedPerks.push({ userId: targetId, perkId: 'SHIELD' });
+      result.shieldUsed = true;
+
+      // Shield reflects the kick back to the attacker
+      // But attacker might have extra life!
+      if (hasActivePerk(players, kickerId, 'EXTRA_LIFE')) {
+        usePerk(players, kickerId, 'EXTRA_LIFE'); // Mutates players!
+        consumedPerks.push({ userId: kickerId, perkId: 'EXTRA_LIFE' });
+        result.extraLifeUsed = true;
+        // Kicker survives with extra life, no one eliminated
+        result.reason = 'extra_life_saved';
+      } else {
+        // Kicker gets eliminated by reflected kick
+        result.eliminated = kickerId;
+        result.reason = 'shield_reflect';
+      }
+
+      return result;
     }
 
+    // No shield - check if target has extra life
+    if (hasActivePerk(players, targetId, 'EXTRA_LIFE')) {
+      usePerk(players, targetId, 'EXTRA_LIFE'); // Mutates players!
+      consumedPerks.push({ userId: targetId, perkId: 'EXTRA_LIFE' });
+      result.extraLifeUsed = true;
+      result.reason = 'extra_life_saved';
+      // Target survives, no one eliminated
+      return result;
+    }
+
+    // No perks - target is eliminated
+    result.eliminated = targetId;
+    result.reason = 'kicked';
+    return result;
+  } catch (error) {
+    // CRITICAL FIX: Rollback consumed perks on error
+    logger.error('[Roulette] Error in processKick, rolling back perks:', error);
+    for (const { userId, perkId } of consumedPerks) {
+      addPerk(players, userId, perkId);
+    }
+    // Return default elimination result
+    result.eliminated = targetId;
+    result.reason = 'kicked';
     return result;
   }
-
-  // No shield - check if target has extra life
-  if (hasActivePerk(players, targetId, 'EXTRA_LIFE')) {
-    usePerk(players, targetId, 'EXTRA_LIFE'); // Mutates players!
-    result.extraLifeUsed = true;
-    result.reason = 'extra_life_saved';
-    // Target survives, no one eliminated
-    return result;
-  }
-
-  // No perks - target is eliminated
-  result.eliminated = targetId;
-  result.reason = 'kicked';
-  return result;
 }
 
 /**

@@ -85,7 +85,7 @@ jest.unstable_mockModule('../../src/utils/helpers.js', () => ({ generateId: mock
 jest.unstable_mockModule('../../src/config/games.config.js', () => ({
   GAMES: {
     DICE: { minPlayers: 2, maxPlayers: 10, lobbyType: 'SIMPLE', countdownSeconds: 30 },
-    ROULETTE: { minPlayers: 2, maxPlayers: 4, lobbyType: 'SLOTS', countdownSeconds: 30 },
+    ROULETTE: { minPlayers: 4, maxPlayers: 20, lobbyType: 'SLOTS', countdownSeconds: 30 },
   },
 }));
 jest.unstable_mockModule('../../src/services/games/audit.service.js', () => ({
@@ -212,5 +212,46 @@ describe('Session lifecycle safety', () => {
 
     const slots = p4.session.players.map((p) => p.slotNumber).sort((a, b) => a - b);
     expect(slots).toEqual([1, 2, 3, 4]);
+  });
+
+  test('roulette 4-player minimum validation - fails with 3, succeeds with 4', async () => {
+    // Test with 3 players (should fail)
+    const session3 = await SessionService.createSession({
+      gameType: 'ROULETTE',
+      guildId: 'g1',
+      channelId: 'c4',
+      user: makeUser('host'),
+    });
+
+    await SessionService.joinSession({ session: session3, user: makeUser('p1') });
+    await SessionService.joinSession({ session: session3, user: makeUser('p2') });
+    const with3 = await SessionService.joinSession({ session: session3, user: makeUser('p3') });
+
+    const start3 = await SessionService.startGame(with3.session);
+    expect(start3.error).toBe('NOT_ENOUGH_PLAYERS');
+    expect(start3.required).toBe(4);
+    expect(start3.current).toBe(3);
+
+    // Session should be auto-cleaned
+    const cleaned = await SessionService.getSession(session3.id);
+    expect(cleaned).toBeNull();
+
+    // Test with 4 players (should succeed)
+    const session4 = await SessionService.createSession({
+      gameType: 'ROULETTE',
+      guildId: 'g1',
+      channelId: 'c5',
+      user: makeUser('host2'),
+    });
+
+    await SessionService.joinSession({ session: session4, user: makeUser('p1') });
+    await SessionService.joinSession({ session: session4, user: makeUser('p2') });
+    await SessionService.joinSession({ session: session4, user: makeUser('p3') });
+    const with4 = await SessionService.joinSession({ session: session4, user: makeUser('p4') });
+
+    const start4 = await SessionService.startGame(with4.session);
+    expect(start4.error).toBeUndefined();
+    expect(start4.session.status).toBe('ACTIVE');
+    expect(start4.session.players).toHaveLength(4);
   });
 });

@@ -24,6 +24,7 @@ import { randomInt } from 'crypto';
 import * as SessionService from '../../services/games/session.service.js';
 import * as CurrencyService from '../../services/economy/currency.service.js';
 import { awardGameWinners } from '../../services/economy/rewards.service.js';
+import { recordGameResult } from '../../services/economy/transaction.service.js';
 import { buttonRouter, sessionManager } from '../../framework/index.js';
 import { generateWheelGif, WHEEL_GIF_DURATION_MS } from './WheelGenerator.js';
 import {
@@ -40,11 +41,63 @@ import logger from '../../utils/logger.js';
 
 // ==================== UTILITY FUNCTIONS ====================
 
+const MAX_DISCORD_GIF_BYTES = Math.floor(7.5 * 1024 * 1024);
+const FALLBACK_SPIN_DELAY_MS = 900;
+
 /**
  * Delay utility (defined at top for clarity)
+ * FIX DESIGN 2: Now cancellable via AbortSignal
+ * @param {number} ms - Delay in milliseconds
+ * @param {AbortSignal} [signal] - Optional abort signal to cancel the delay
+ * @returns {Promise<void>}
  */
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function delay(ms, signal = null) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('Delay aborted'));
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(new Error('Delay aborted'));
+    };
+
+    if (signal) {
+      signal.addEventListener('abort', onAbort);
+    }
+  });
+}
+
+/**
+ * Safe delay that ignores abort errors
+ * FIX DESIGN 2: Helper to gracefully handle cancelled delays
+ */
+async function safeDelay(gameState, ms) {
+  try {
+    await delay(ms, gameState?.abortController?.signal);
+  } catch (error) {
+    if (error.message === 'Delay aborted') {
+      // Silently ignore - game was cancelled
+      logger.debug(`[Roulette] Delay cancelled for session ${gameState?.sessionId}`);
+    } else {
+      throw error;
+    }
+  }
+}
+
+function formatDiscordError(error) {
+  const message = error?.rawError?.message || error?.message || 'Unknown error';
+  const code = error?.code ?? error?.rawError?.code ?? 'n/a';
+  const status = error?.status ?? error?.rawError?.status ?? 'n/a';
+  return `${message} (code: ${code}, status: ${status})`;
 }
 
 function getSelectValue(interaction) {
@@ -57,23 +110,54 @@ function getSelectValue(interaction) {
 // Store active games (in-memory for timeouts and local state)
 const activeGames = new Map();
 
-// Simple concurrency locks per session (Enhancement #3)
+// FIX BUG 3: Event-based locks (Promise queue) instead of busy-wait
 const sessionLocks = new Map();
 
 /**
+ * FIX CRITICAL 5: Atomic phase transition with timeout cleanup
+ * Ensures old timeouts are cleared before phase changes
+ */
+function changePhase(gameState, newPhase) {
+  // Clear any pending timeout
+  if (gameState.turnTimeout) {
+    clearTimeout(gameState.turnTimeout);
+    gameState.turnTimeout = null;
+  }
+
+  // Update phase
+  gameState.phase = newPhase;
+  logger.debug(`[Roulette] Phase changed to ${newPhase} for session ${gameState.sessionId}`);
+}
+
+/**
  * Execute function with session lock to prevent race conditions
+ * FIX BUG 3: Now uses event-based locking instead of busy-wait polling
  */
 async function withLock(sessionId, fn) {
-  // Wait for any existing lock
-  while (sessionLocks.get(sessionId)) {
-    await delay(10);
+  // Get or create lock queue for this session
+  let lockQueue = sessionLocks.get(sessionId);
+  if (!lockQueue) {
+    lockQueue = Promise.resolve();
+    sessionLocks.set(sessionId, lockQueue);
   }
-  
-  sessionLocks.set(sessionId, true);
+
+  // Chain our operation to the end of the queue
+  const result = lockQueue.then(fn).catch(error => {
+    logger.error('[Roulette] Lock execution error:', error);
+    throw error;
+  });
+
+  // Update the queue to wait for our operation
+  sessionLocks.set(sessionId, result.catch(() => {})); // Catch to prevent unhandled rejection in queue
+
   try {
-    return await fn();
+    return await result;
   } finally {
-    sessionLocks.delete(sessionId);
+    // Clean up lock if queue is empty
+    const currentQueue = sessionLocks.get(sessionId);
+    if (currentQueue === result.catch(() => {})) {
+      sessionLocks.delete(sessionId);
+    }
   }
 }
 
@@ -91,6 +175,7 @@ export function registerRouletteHandler() {
 
 /**
  * Handle button actions from framework
+ * FIX HIGH 3: Added phase validation for all actions
  * @param {Object} ctx - Context from ButtonRouter
  */
 async function handleRouletteAction(ctx) {
@@ -103,11 +188,20 @@ async function handleRouletteAction(ctx) {
 
   // Use lock to prevent race conditions
   await withLock(session.id, async () => {
+    // FIX HIGH 3: Phase validation to prevent stale clicks
     switch (action) {
       case 'kick':
+        if (gameState.phase !== 'KICK_SELECTION') {
+          logger.debug(`[Roulette] Stale kick click in phase ${gameState.phase}`);
+          return;
+        }
         await handleKickTarget(ctx, gameState, details);
         break;
       case 'kick_select': {
+        if (gameState.phase !== 'KICK_SELECTION') {
+          logger.debug(`[Roulette] Stale kick_select in phase ${gameState.phase}`);
+          return;
+        }
         const targetId = getSelectValue(interaction);
         if (!targetId) {
           await interaction.followUp({ content: '❌ اختيار غير صالح', ephemeral: true });
@@ -117,9 +211,17 @@ async function handleRouletteAction(ctx) {
         break;
       }
       case 'kick2':
+        if (gameState.phase !== 'DOUBLE_KICK') {
+          logger.debug(`[Roulette] Stale kick2 in phase ${gameState.phase}`);
+          return;
+        }
         await handleSecondKick(ctx, gameState, details);
         break;
       case 'kick2_select': {
+        if (gameState.phase !== 'DOUBLE_KICK') {
+          logger.debug(`[Roulette] Stale kick2_select in phase ${gameState.phase}`);
+          return;
+        }
         const targetId = getSelectValue(interaction);
         if (!targetId) {
           await interaction.followUp({ content: '❌ اختيار غير صالح', ephemeral: true });
@@ -129,15 +231,31 @@ async function handleRouletteAction(ctx) {
         break;
       }
       case 'selfkick':
+        if (gameState.phase !== 'KICK_SELECTION') {
+          logger.debug(`[Roulette] Stale selfkick in phase ${gameState.phase}`);
+          return;
+        }
         await handleSelfKick(ctx, gameState);
         break;
       case 'randomkick':
+        if (gameState.phase !== 'KICK_SELECTION') {
+          logger.debug(`[Roulette] Stale randomkick in phase ${gameState.phase}`);
+          return;
+        }
         await handleRandomKick(ctx, gameState);
         break;
       case 'doublekick':
+        if (gameState.phase !== 'KICK_SELECTION') {
+          logger.debug(`[Roulette] Stale doublekick in phase ${gameState.phase}`);
+          return;
+        }
         await handleDoubleKickPurchase(ctx, gameState);
         break;
       case 'skip_double':
+        if (gameState.phase !== 'DOUBLE_KICK') {
+          logger.debug(`[Roulette] Stale skip_double in phase ${gameState.phase}`);
+          return;
+        }
         await handleSkipDoubleKick(ctx, gameState);
         break;
       case 'shop':
@@ -176,20 +294,28 @@ export async function startRouletteGame(session, channel) {
       if (!p.userId) {
         throw new Error(`[Roulette] Player at index ${index} missing userId`);
       }
-      
+
       // Default slot to index+1 if not provided
       const slot = p.slot ?? p.slotNumber ?? (index + 1);
-      
+
+      // FIX HIGH 7: Validate slot range
+      if (slot < 1 || slot > GAME_SETTINGS.maxSlots) {
+        throw new Error(`[Roulette] Invalid slot ${slot} for player ${p.userId} (max: ${GAME_SETTINGS.maxSlots})`);
+      }
+
       return {
         userId: p.userId,
         displayName: p.displayName || 'Unknown',
         alive: true,
-        perks: Array.isArray(p.perks) ? [...p.perks] : [],
+        // FIX HIGH 8: Deep clone perks (ensure primitive strings)
+        perks: Array.isArray(p.perks) ? p.perks.map(perkId => String(perkId)) : [],
         slot,
       };
     });
 
     // Initialize game state
+    // FIX DESIGN 2: Add AbortController for cancellable delays
+    const abortController = new AbortController();
     const gameState = {
       sessionId: session.id,
       channel,
@@ -201,6 +327,11 @@ export async function startRouletteGame(session, channel) {
       currentKickerId: null,
       doubleKickActive: false,
       doubleKickFirstTarget: null,
+      abortController,
+      // FIX HIGH 1: Cache alive players list for performance
+      alivePlayers: players.slice(), // Initially all alive
+      // FIX HIGH 9: Track perk purchase times for rate limiting
+      perkPurchaseTime: {},
     };
 
     activeGames.set(session.id, gameState);
@@ -229,15 +360,13 @@ export async function startRouletteGame(session, channel) {
 
 /**
  * Run a single spin round
+ * FIX HIGH 2: Reduced redundant session saves
  */
 async function runSpinRound(gameState, session) {
   if (gameState.phase === 'GAME_END') return;
 
-  session.phase = 'SPINNING';
-  await sessionManager.save(session);
-
-  // Get alive players
-  const alivePlayers = gameState.players.filter(p => p.alive);
+  // FIX HIGH 1: Use cached alive players list
+  const alivePlayers = gameState.alivePlayers;
   gameState.currentRound++;
 
   // Check for winner (only 1 player left)
@@ -252,17 +381,22 @@ async function runSpinRound(gameState, session) {
     return;
   }
 
-  gameState.phase = 'SPINNING';
+  // CRITICAL FIX: Use atomic phase transition
+  changePhase(gameState, 'SPINNING');
 
-  // Send round embed
-  const roundEmbed = Embeds.createRoundEmbed(gameState.currentRound, alivePlayers);
-  await gameState.channel.send({ embeds: [roundEmbed] });
+  // FIX HIGH 5: Defensive check before randomInt to prevent crash
+  if (alivePlayers.length === 0) {
+    logger.error(`[Roulette] No alive players for spin in session ${session.id}`);
+    await endGame(gameState, session, null);
+    return;
+  }
 
   // Pre-select random player using crypto.randomInt
   const selectedIndex = randomInt(alivePlayers.length);
   const chosenPlayer = alivePlayers[selectedIndex];
 
-  // Generate and send wheel GIF
+  // Generate and send wheel GIF (with size guard for Discord limits)
+  let gifSent = false;
   try {
     // Prepare players for wheel (needs name property)
     const wheelPlayers = alivePlayers.map(p => ({
@@ -272,24 +406,33 @@ async function runSpinRound(gameState, session) {
     }));
 
     const gifBuffer = await generateWheelGif(wheelPlayers, selectedIndex);
-    const attachment = new AttachmentBuilder(gifBuffer, { name: 'wheel.gif' });
 
-    await gameState.channel.send({ files: [attachment] });
+    // FIX HIGH 6: Validate buffer before upload
+    if (!gifBuffer || gifBuffer.length === 0) {
+      logger.warn('[Roulette] Empty GIF buffer generated');
+      gifSent = false;
+    } else if (gifBuffer.length > MAX_DISCORD_GIF_BYTES) {
+      logger.warn(
+        `[Roulette] Skipping wheel GIF upload; file too large (${gifBuffer.length} bytes > ${MAX_DISCORD_GIF_BYTES})`
+      );
+      gifSent = false;
+    } else {
+      try {
+        const attachment = new AttachmentBuilder(gifBuffer, { name: 'wheel.gif' });
+        await gameState.channel.send({ files: [attachment] });
+        gifSent = true;
+      } catch (uploadError) {
+        logger.warn(`[Roulette] GIF upload failed: ${formatDiscordError(uploadError)}`);
+        gifSent = false;
+      }
+    }
   } catch (error) {
-    logger.error('[Roulette] Failed to generate wheel GIF:', error);
-    // Fallback text animation
-    await gameState.channel.send({ content: '🎡 *جاري تدوير العجلة...*' });
+    logger.warn(`[Roulette] Wheel GIF generation failed: ${formatDiscordError(error)}`);
+    gifSent = false;
   }
 
-  // Wait for GIF animation
-  await delay(WHEEL_GIF_DURATION_MS);
-
-  // Announce chosen player
-  const chosenEmbed = Embeds.createChosenEmbed(chosenPlayer, gameState.currentRound);
-  await gameState.channel.send({
-    content: `<@${chosenPlayer.userId}>`,
-    embeds: [chosenEmbed],
-  });
+  // Wait for GIF animation only if GIF was posted
+  await delay(gifSent ? WHEEL_GIF_DURATION_MS : FALLBACK_SPIN_DELAY_MS);
 
   // Start kick selection
   await startKickSelection(gameState, session, chosenPlayer);
@@ -312,39 +455,39 @@ async function startKickSelection(gameState, session, kickerPlayer) {
     return;
   }
 
-  gameState.phase = 'KICK_SELECTION';
+  // CRITICAL FIX: Use atomic phase transition
+  changePhase(gameState, 'KICK_SELECTION');
   gameState.currentKickerId = kickerPlayer.userId;
   gameState.doubleKickActive = false;
   gameState.doubleKickFirstTarget = null;
 
-  // Get potential targets (everyone alive except kicker)
-  const alivePlayers = gameState.players.filter(p => p.alive);
-  const targetPlayers = alivePlayers.filter(p => p.userId !== kickerPlayer.userId);
+  // FIX HIGH 1: Use cached alive players
+  const targetPlayers = gameState.alivePlayers.filter(p => p.userId !== kickerPlayer.userId);
 
   // Check if kicker can afford double kick
   const { canBuy } = await PerksLogic.canBuyDoubleKick(kickerPlayer.userId);
 
-  // Update session for ButtonRouter phase tracking (use string, not number!)
+  // FIX HIGH 2: Batch session update - phase already set by changePhase in state
   session.phase = 'KICK_SELECTION';
-  await sessionManager.commit(session);
+  // Commit will happen at end of turn, not immediately
 
-  // Create kick selection embed and buttons
-  const kickEmbed = Embeds.createKickSelectionEmbed(kickerPlayer, targetPlayers);
+  // Create kick selection buttons
   const kickButtons = Buttons.createKickButtons(session, targetPlayers, canBuy, PERKS.DOUBLE_KICK.cost);
 
   await gameState.channel.send({
-    embeds: [kickEmbed],
+    content: `<@${kickerPlayer.userId}> لديك ${GAME_SETTINGS.kickTimeout} ثانية لاختيار لاعب لطرده`,
     components: kickButtons,
   });
 
   // Set timeout for kick selection
+  // FIX DESIGN 3: Add .unref() to allow graceful shutdown
   gameState.turnTimeout = setTimeout(() => {
     handleKickTimeout(gameState, session, kickerPlayer).catch(error => {
       logger.error('[Roulette] Kick timeout error:', error);
       // Cleanup on critical error
       cleanupGame(session.id);
     });
-  }, TURN_TIMEOUT_MS);
+  }, TURN_TIMEOUT_MS).unref();
 }
 
 // ==================== TIMEOUT HANDLING ====================
@@ -387,12 +530,13 @@ async function handleKickTimeout(gameState, session, kickerPlayer) {
 
 /**
  * Handle kick target selection
+ * FIX CRITICAL 2: Added null check for currentKickerId
  */
 async function handleKickTarget(ctx, gameState, targetId) {
   const { session, player, interaction } = ctx;
 
-  // Verify it's the current player's turn
-  if (gameState.currentKickerId !== player.id) {
+  // CRITICAL FIX: Verify currentKickerId is not null and matches current player
+  if (!gameState.currentKickerId || gameState.currentKickerId !== player.id) {
     await interaction.followUp({ content: `❌ ${MESSAGES.NOT_YOUR_TURN}`, ephemeral: true });
     return;
   }
@@ -403,9 +547,15 @@ async function handleKickTarget(ctx, gameState, targetId) {
     gameState.turnTimeout = null;
   }
 
-  // Find target
+  // CRITICAL FIX: Find and validate target exists in game state
   const target = gameState.players.find(p => p.userId === targetId);
-  if (!target || !target.alive) {
+  if (!target) {
+    logger.warn(`[Roulette] Invalid target ${targetId} not found in game state for session ${session.id}`);
+    await interaction.followUp({ content: `❌ ${MESSAGES.NOT_IN_GAME}`, ephemeral: true });
+    return;
+  }
+
+  if (!target.alive) {
     await interaction.followUp({ content: `❌ ${MESSAGES.ALREADY_ELIMINATED}`, ephemeral: true });
     return;
   }
@@ -423,6 +573,13 @@ async function handleKickTarget(ctx, gameState, targetId) {
 
   // Process kick with perk logic
   const kickResult = PerksLogic.processKick(gameState.players, player.id, targetId);
+
+  // FIX HIGH 11: Audit log the kick attempt
+  logger.info(
+    `[Roulette] Kick: ${player.id} -> ${targetId} | Result: ${kickResult.reason} | ` +
+    `Shield: ${kickResult.shieldUsed} | ExtraLife: ${kickResult.extraLifeUsed} | ` +
+    `Eliminated: ${kickResult.eliminated || 'none'} | Session: ${session.id}`
+  );
 
   // Handle the result
   if (kickResult.shieldUsed) {
@@ -505,7 +662,8 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
     return;
   }
 
-  gameState.phase = 'DOUBLE_KICK';
+  // CRITICAL FIX: Use atomic phase transition
+  changePhase(gameState, 'DOUBLE_KICK');
   session.phase = 'DOUBLE_KICK';
   await sessionManager.commit(session);
 
@@ -519,6 +677,7 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
   });
 
   // Set timeout for second kick
+  // FIX DESIGN 3: Add .unref() to allow graceful shutdown
   gameState.turnTimeout = setTimeout(() => {
     withLock(session.id, async () => {
       // Skip second kick on timeout
@@ -540,7 +699,7 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
       // Cleanup on critical error
       cleanupGame(session.id);
     });
-  }, TURN_TIMEOUT_MS);
+  }, TURN_TIMEOUT_MS).unref();
 }
 
 /**
@@ -592,16 +751,24 @@ async function handleSecondKick(ctx, gameState, targetId) {
 
   // Handle the result
   if (kickResult.shieldUsed) {
-    const shieldEmbed = Embeds.createShieldReflectEmbed(target, kicker, kickResult.extraLifeUsed);
-    await gameState.channel.send({ embeds: [shieldEmbed] });
+    // Plain text feedback (no embeds)
+    let shieldMessage = `🛡️ <@${target.userId}> كان لابس درع والطلقة ارتدت على <@${kicker.userId}>!`;
+    if (kickResult.extraLifeUsed) {
+      shieldMessage += `\n❤️ <@${kicker.userId}> استخدم حياة إضافية ونجا!`;
+    } else if (kickResult.eliminated) {
+      shieldMessage += `\n💀 <@${kicker.userId}> تم طرده!`;
+    }
+    await gameState.channel.send({ content: shieldMessage });
 
     if (kickResult.eliminated) {
       await eliminatePlayer(gameState, session, kickResult.eliminated, 'shield_reflect');
       return;
     }
   } else if (kickResult.extraLifeUsed && !kickResult.eliminated) {
-    const lifeEmbed = Embeds.createExtraLifeEmbed(target);
-    await gameState.channel.send({ embeds: [lifeEmbed] });
+    // Plain text feedback
+    await gameState.channel.send({
+      content: `❤️ <@${target.userId}> كان معه حياة إضافية ونجا من الطرد!`
+    });
   } else if (kickResult.eliminated) {
     await eliminatePlayer(gameState, session, kickResult.eliminated, kickResult.reason);
     return;
@@ -659,12 +826,20 @@ async function handleRandomKick(ctx, gameState) {
 
 /**
  * Handle double kick perk purchase during kick phase
+ * FIX HIGH 9: Added rate limiting
  */
 async function handleDoubleKickPurchase(ctx, gameState) {
   const { session, player, interaction } = ctx;
 
   if (gameState.currentKickerId !== player.id) {
     await interaction.followUp({ content: `❌ ${MESSAGES.NOT_YOUR_TURN}`, ephemeral: true });
+    return;
+  }
+
+  // FIX HIGH 9: Rate limit perk purchases (500ms cooldown)
+  const lastPurchase = gameState.perkPurchaseTime[player.id] || 0;
+  if (Date.now() - lastPurchase < 500) {
+    await interaction.followUp({ content: '❌ انتظر قليلاً قبل الشراء مرة أخرى', ephemeral: true });
     return;
   }
 
@@ -697,6 +872,16 @@ async function handleDoubleKickPurchase(ctx, gameState) {
 
   // Activate double kick
   gameState.doubleKickActive = true;
+
+  // FIX HIGH 9: Update purchase timestamp
+  gameState.perkPurchaseTime[player.id] = Date.now();
+
+  // FIX HIGH: Verify newBalance is valid before displaying
+  if (!Number.isInteger(result.newBalance) || result.newBalance < 0) {
+    logger.warn(`[Roulette] Invalid newBalance after double kick purchase: ${result.newBalance}`);
+    const freshBalance = await CurrencyService.getBalance(player.id);
+    result.newBalance = freshBalance;
+  }
 
   await interaction.followUp({
     content: `${MESSAGES.DOUBLE_KICK_ACTIVATED}\n💰 الرصيد: **${result.newBalance}** عملة`,
@@ -753,9 +938,17 @@ async function handleShop(ctx, gameState) {
 
 /**
  * Handle perk purchase from shop
+ * FIX HIGH 9: Added rate limiting
  */
 async function handlePerkPurchase(ctx, gameState, perkId) {
   const { session, player, interaction } = ctx;
+
+  // FIX HIGH 9: Rate limit perk purchases (500ms cooldown)
+  const lastPurchase = gameState.perkPurchaseTime[player.id] || 0;
+  if (Date.now() - lastPurchase < 500) {
+    await interaction.followUp({ content: '❌ انتظر قليلاً قبل الشراء مرة أخرى', ephemeral: true });
+    return;
+  }
 
   // Check if already owns perk
   if (PerksLogic.hasActivePerk(gameState.players, player.id, perkId)) {
@@ -787,6 +980,16 @@ async function handlePerkPurchase(ctx, gameState, perkId) {
 
   // Add perk to player
   PerksLogic.addPerk(gameState.players, player.id, perkId);
+
+  // FIX HIGH 9: Update purchase timestamp
+  gameState.perkPurchaseTime[player.id] = Date.now();
+
+  // FIX HIGH: Verify newBalance is valid before displaying
+  if (!Number.isInteger(result.newBalance) || result.newBalance < 0) {
+    logger.warn(`[Roulette] Invalid newBalance after perk purchase: ${result.newBalance}`);
+    const freshBalance = await CurrencyService.getBalance(player.id);
+    result.newBalance = freshBalance;
+  }
 
   await interaction.followUp({
     content: MESSAGES.PURCHASE_SUCCESS(result.perk.name, result.newBalance),
@@ -823,6 +1026,7 @@ async function eliminatePlayer(gameState, session, userId, reason = 'kicked') {
 
 /**
  * Eliminate a player without continuing to next round
+ * FIX HIGH 1: Updates alive players cache
  * @returns {boolean} - Whether elimination was successful
  */
 async function eliminatePlayerWithoutContinue(gameState, userId, reason = 'kicked') {
@@ -834,9 +1038,27 @@ async function eliminatePlayerWithoutContinue(gameState, userId, reason = 'kicke
 
   player.alive = false;
 
-  // Send elimination message
-  const elimEmbed = Embeds.createEliminationEmbed(player, reason);
-  await gameState.channel.send({ embeds: [elimEmbed] });
+  // FIX HIGH 1: Update cached alive players list
+  const idx = gameState.alivePlayers.findIndex(p => p.userId === userId);
+  if (idx >= 0) {
+    gameState.alivePlayers.splice(idx, 1);
+  }
+
+  // Send elimination message (plain message, no embed)
+  let message = '';
+  if (reason === 'timeout') {
+    message = `⏰ انتهى الوقت! تم طرد <@${player.userId}> لعدم الاختيار!`;
+  } else if (reason === 'self_kick') {
+    message = `🤡 <@${player.userId}> انسحب من اللعبة!`;
+  } else if (reason === 'shield_reflect') {
+    message = `🛡️ تم طرد <@${player.userId}> بسبب الدرع!`;
+  } else {
+    message = `💣 تم طرد <@${player.userId}> من اللعبة!`;
+  }
+
+  await gameState.channel.send({
+    content: `${message}\n\n⏳ سيتم بدء الجولة القادمة في بضع ثواني...`,
+  });
   
   return true;
 }
@@ -846,9 +1068,24 @@ async function eliminatePlayerWithoutContinue(gameState, userId, reason = 'kicke
 /**
  * Run the final round (2 players left)
  * FIX #22: Final round now properly handles perks
+ * FIX CRITICAL 1: Added depth limit to prevent infinite recursion
  */
-async function runFinalRound(gameState, session, finalPlayers) {
-  gameState.phase = 'FINAL_ROUND';
+async function runFinalRound(gameState, session, finalPlayers, depth = 0) {
+  const MAX_FINAL_ROUND_ATTEMPTS = 10;
+
+  // CRITICAL FIX: Prevent stack overflow if perks keep preventing elimination
+  if (depth >= MAX_FINAL_ROUND_ATTEMPTS) {
+    logger.warn(`[Roulette] Final round depth limit reached (${depth}). Awarding to random player.`);
+    const winner = finalPlayers[randomInt(finalPlayers.length)];
+    await gameState.channel.send({
+      content: `⚠️ تعذر تحديد الفائز بعد ${MAX_FINAL_ROUND_ATTEMPTS} محاولات. تم اختيار فائز عشوائي!`,
+    });
+    await endGame(gameState, session, winner);
+    return;
+  }
+
+  // CRITICAL FIX: Use atomic phase transition
+  changePhase(gameState, 'FINAL_ROUND');
 
   // Send final round announcement
   const finalEmbed = Embeds.createFinalRoundEmbed(finalPlayers[0], finalPlayers[1]);
@@ -862,6 +1099,7 @@ async function runFinalRound(gameState, session, finalPlayers) {
   const target = finalPlayers[1 - kickerIndex]; // The other player
 
   // Generate and send final wheel GIF
+  let gifSent = false;
   try {
     const wheelPlayers = finalPlayers.map(p => ({
       name: p.displayName,
@@ -870,23 +1108,34 @@ async function runFinalRound(gameState, session, finalPlayers) {
     }));
 
     const gifBuffer = await generateWheelGif(wheelPlayers, kickerIndex);
-    const attachment = new AttachmentBuilder(gifBuffer, { name: 'final-wheel.gif' });
-    await gameState.channel.send({ files: [attachment] });
+    if (gifBuffer.length <= MAX_DISCORD_GIF_BYTES) {
+      const attachment = new AttachmentBuilder(gifBuffer, { name: 'final-wheel.gif' });
+      await gameState.channel.send({ files: [attachment] });
+      gifSent = true;
+    } else {
+      logger.warn(
+        `[Roulette] Skipping final wheel GIF upload; file too large (${gifBuffer.length} bytes > ${MAX_DISCORD_GIF_BYTES})`
+      );
+    }
   } catch (error) {
-    logger.error('[Roulette] Failed to generate final wheel GIF:', error);
-    await gameState.channel.send({ content: '🎡 *جاري تدوير العجلة النهائية...*' });
+    logger.warn(`[Roulette] Final wheel GIF unavailable: ${formatDiscordError(error)}`);
   }
 
-  await delay(WHEEL_GIF_DURATION_MS);
+  await delay(gifSent ? WHEEL_GIF_DURATION_MS : FALLBACK_SPIN_DELAY_MS);
 
   // FIX #22: Process the kick with perks (Shield, Extra Life)
   // The kicker "kicks" the target, perks apply!
   const kickResult = PerksLogic.processKick(gameState.players, kicker.userId, target.userId);
 
   if (kickResult.shieldUsed) {
-    // Target had shield - reflects to kicker
-    const shieldEmbed = Embeds.createShieldReflectEmbed(target, kicker, kickResult.extraLifeUsed);
-    await gameState.channel.send({ embeds: [shieldEmbed] });
+    // Target had shield - reflects to kicker (plain text feedback)
+    let shieldMessage = `🛡️ <@${target.userId}> كان لابس درع والطلقة ارتدت على <@${kicker.userId}>!`;
+    if (kickResult.extraLifeUsed) {
+      shieldMessage += `\n❤️ <@${kicker.userId}> استخدم حياة إضافية ونجا!`;
+    } else if (kickResult.eliminated) {
+      shieldMessage += `\n💀 <@${kicker.userId}> تم طرده!`;
+    }
+    await gameState.channel.send({ content: shieldMessage });
 
     if (kickResult.eliminated === kicker.userId) {
       // Kicker eliminated by reflection - target wins!
@@ -897,18 +1146,19 @@ async function runFinalRound(gameState, session, finalPlayers) {
       // Kicker survived with extra life - both still alive, spin again!
       await gameState.channel.send({ content: '🔄 لم يُقصى أحد! إعادة التدوير...' });
       await delay(2000);
-      await runFinalRound(gameState, session, gameState.players.filter(p => p.alive));
+      await runFinalRound(gameState, session, gameState.players.filter(p => p.alive), depth + 1);
       return;
     }
   }
 
   if (kickResult.extraLifeUsed && !kickResult.eliminated) {
-    // Target survived with extra life - spin again!
-    const lifeEmbed = Embeds.createExtraLifeEmbed(target);
-    await gameState.channel.send({ embeds: [lifeEmbed] });
+    // Target survived with extra life - spin again! (plain text feedback)
+    await gameState.channel.send({
+      content: `❤️ <@${target.userId}> كان معه حياة إضافية ونجا من الطرد!`
+    });
     await gameState.channel.send({ content: '🔄 لم يُقصى أحد! إعادة التدوير...' });
     await delay(2000);
-    await runFinalRound(gameState, session, gameState.players.filter(p => p.alive));
+    await runFinalRound(gameState, session, gameState.players.filter(p => p.alive), depth + 1);
     return;
   }
 
@@ -927,13 +1177,8 @@ async function runFinalRound(gameState, session, finalPlayers) {
  * FIX #26: Use try-finally to prevent memory leak
  */
 async function endGame(gameState, session, winner) {
-  gameState.phase = 'GAME_END';
-
-  // Clear any pending timeout first
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-    gameState.turnTimeout = null;
-  }
+  // CRITICAL FIX: Use atomic phase transition (clears timeout automatically)
+  changePhase(gameState, 'GAME_END');
 
   let endReason = 'COMPLETED';
 
@@ -952,21 +1197,45 @@ async function endGame(gameState, session, winner) {
     logger.error('[Roulette] Reward payout failed:', error);
   }
 
+  // FIX BUG 1: Record losses for all non-winners
+  const loserIds = gameState.players
+    .filter(p => p.userId !== winner.userId)
+    .map(p => p.userId);
+
+  const statsMetadata = {
+    sessionId: gameState.sessionId,
+    roundsPlayed: gameState.currentRound || 1,
+    playerCount: gameState.players.length,
+  };
+
+  await Promise.allSettled(
+    loserIds.map(id => recordGameResult(id, 'ROULETTE', 'LOSS', statsMetadata))
+  );
+
   if (rewardResult) {
     try {
       const reward = rewardResult.reward;
-      const newBalance = rewardResult.results[0]?.newBalance
-        ?? await CurrencyService.getBalance(winner.userId);
+      // FIX CRITICAL: Verify payout succeeded before showing balance
+      const payoutSuccess = rewardResult.results?.[0]?.success === true;
+      const newBalance = rewardResult.results?.[0]?.newBalance;
 
-      // Send winner embed
-      const winEmbed = Embeds.createWinnerEmbed(winner, reward, newBalance);
-      const winButtons = Buttons.createWinnerButtons(newBalance, reward);
+      if (payoutSuccess && newBalance != null) {
+        // Payout succeeded - show winner with correct balance
+        const winEmbed = Embeds.createWinnerEmbed(winner, reward, newBalance);
+        const winButtons = Buttons.createWinnerButtons(newBalance, reward);
 
-      await gameState.channel.send({
-        content: `<@${winner.userId}>`,
-        embeds: [winEmbed],
-        components: winButtons,
-      });
+        await gameState.channel.send({
+          content: `<@${winner.userId}>`,
+          embeds: [winEmbed],
+          components: winButtons,
+        });
+      } else {
+        // Payout failed - announce winner but warn about reward failure
+        await gameState.channel.send({
+          content: `🏆 <@${winner.userId}> فاز باللعبة!\n⚠️ حدث خطأ في منح الجائزة. يرجى التواصل مع الإدارة.`
+        });
+        logger.error(`[Roulette] Winner ${winner.userId} but reward payout failed. Result:`, rewardResult);
+      }
 
       logger.info(`[Roulette] Game ended: ${gameState.sessionId} - Winner: ${winner.displayName}`);
     } catch (error) {
@@ -988,10 +1257,18 @@ async function endGame(gameState, session, winner) {
 
 /**
  * Cancel roulette game
+ * FIX BUG 2: Now properly ends session before cleanup
  */
-export function cancelRouletteGame(sessionId, reason = 'CANCELLED') {
+export async function cancelRouletteGame(sessionId, reason = 'CANCELLED') {
   const gameState = activeGames.get(sessionId);
   if (!gameState) return false;
+
+  // End the session in SessionService before local cleanup
+  try {
+    await SessionService.endSession(sessionId, null, reason);
+  } catch (error) {
+    logger.error('[Roulette] Failed to end session during cancellation:', error);
+  }
 
   cleanupGame(sessionId);
   logger.info(`[Roulette] Game cancelled: ${sessionId} - Reason: ${reason}`);
@@ -1000,11 +1277,19 @@ export function cancelRouletteGame(sessionId, reason = 'CANCELLED') {
 
 /**
  * Cleanup game resources
+ * FIX DESIGN 2: Now aborts pending delays
  */
 function cleanupGame(sessionId) {
   const gameState = activeGames.get(sessionId);
-  if (gameState?.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
+  if (gameState) {
+    // Clear turn timeout
+    if (gameState.turnTimeout) {
+      clearTimeout(gameState.turnTimeout);
+    }
+    // FIX DESIGN 2: Abort all pending delays
+    if (gameState.abortController) {
+      gameState.abortController.abort();
+    }
   }
   activeGames.delete(sessionId);
   sessionLocks.delete(sessionId); // Also clean up any locks
@@ -1031,11 +1316,12 @@ export function getActiveGameByChannel(channelId) {
 
 /**
  * Cancel active roulette game by channel ID
+ * FIX BUG 2: Now async to properly await session cleanup
  */
-export function cancelRouletteGameByChannel(channelId, reason = 'CANCELLED') {
+export async function cancelRouletteGameByChannel(channelId, reason = 'CANCELLED') {
   const gameState = getActiveGameByChannel(channelId);
   if (!gameState) return false;
-  return cancelRouletteGame(gameState.sessionId, reason);
+  return await cancelRouletteGame(gameState.sessionId, reason);
 }
 
 /**

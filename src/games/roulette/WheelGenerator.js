@@ -51,8 +51,8 @@ try {
 
 // ==================== CONSTANTS ====================
 
-// Supersampling for crisp wheel rendering
-const SCALE = 2;
+// Keep dimensions moderate for faster generation and smaller Discord upload size.
+const SCALE = 1;
 
 const CANVAS = {
   width: 550 * SCALE,
@@ -98,11 +98,11 @@ const COLORS = {
 
 // Physics-based animation settings
 const ANIMATION = {
-  baseFps: 20,
+  baseFps: 14,
   totalSpins: 3.5, // Number of full rotations
-  duration: 2.5, // seconds of spinning
-  anticipationFrames: 5, // Wind-back frames
-  celebrationFrames: 30, // Hold on winner (1.5s at 20fps)
+  duration: 1.6, // seconds of spinning
+  anticipationFrames: 3, // Wind-back frames
+  celebrationFrames: 8, // brief hold on winner
   motionBlurStrength: 0.15, // Motion blur alpha
   motionBlurOffset: 2, // Motion blur angle offset
   // Tick effect threshold - when speed drops below this (deg/sec), apply ticking
@@ -477,7 +477,7 @@ export async function generateWheelGif(players, winnerIndex) {
   const encoder = new GIFEncoder(CANVAS.targetWidth, CANVAS.targetHeight);
   encoder.start();
   encoder.setRepeat(-1); // -1 = no repeat (play once)
-  encoder.setQuality(1); // Best quality
+  encoder.setQuality(10); // Smaller file size while preserving clarity
   // Note: Removed setTransparent(0x00000000) - it was making black strokes/borders transparent
 
   // High-res wheel canvas (2x supersampled)

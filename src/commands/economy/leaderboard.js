@@ -160,9 +160,10 @@ async function buildGameLeaderboard(gameType, client) {
     take: 10
   });
 
-  if (ENABLE_CONSISTENCY_CHECK) {
-    await checkLeaderboardConsistency(gameType, stats);
-  }
+  // FIX MEDIUM: Always run consistency check and capture results for user warning
+  const consistencyIssues = ENABLE_CONSISTENCY_CHECK
+    ? await checkLeaderboardConsistency(gameType, stats)
+    : { hasIssues: false, count: 0 };
 
   const medals = ['🥇', '🥈', '🥉'];
   let description = '';
@@ -190,21 +191,32 @@ async function buildGameLeaderboard(gameType, client) {
   // Weekly rewards info (centralized from config)
   const rewardsInfo = `**جوائز نهاية الأسبوع:**\n🥇 ${formatNumber(WEEKLY_REWARDS[1] || 0)} | 🥈 ${formatNumber(WEEKLY_REWARDS[2] || 0)} | 🥉 ${formatNumber(WEEKLY_REWARDS[3] || 0)}`;
 
+  // FIX MEDIUM: Add consistency warning to footer if issues detected
+  let footerText = 'يتم إعادة التعيين كل يوم جمعة';
+  if (consistencyIssues.hasIssues) {
+    footerText += ' | ⚠️ تم اكتشاف بعض التناقضات في البيانات';
+  }
+
   return new EmbedBuilder()
     .setColor(config.colors.primary)
     .setTitle(`${game?.emoji || '🎮'} لوحة الصدارة الأسبوعية — ${game?.name || gameType}`)
     .setDescription(description + '\n\n' + rewardsInfo)
-    .setFooter({ text: 'يتم إعادة التعيين كل يوم جمعة' })
+    .setFooter({ text: footerText })
     .setTimestamp();
 }
 
 async function checkLeaderboardConsistency(gameType, stats) {
-  if (!Array.isArray(stats) || stats.length === 0) return;
+  if (!Array.isArray(stats) || stats.length === 0) {
+    return { hasIssues: false, count: 0 };
+  }
+
+  let totalIssues = 0;
 
   const logicalIssues = stats.filter(
     s => s.weeklyWins > s.weeklyGames || s.totalWins > s.totalGames
   );
   if (logicalIssues.length > 0) {
+    totalIssues += logicalIssues.length;
     logger.warn(`[Leaderboard] Logical stat mismatch for ${gameType}`, {
       count: logicalIssues.length,
       users: logicalIssues.map(s => s.userId),
@@ -225,6 +237,7 @@ async function checkLeaderboardConsistency(gameType, stats) {
     const stat = sample[i];
     const txCount = txCounts[i];
     if (txCount < stat.totalWins) {
+      totalIssues++;
       logger.warn(`[Leaderboard] Transaction/stat drift detected for ${gameType}`, {
         userId: stat.userId,
         totalWins: stat.totalWins,
@@ -232,4 +245,10 @@ async function checkLeaderboardConsistency(gameType, stats) {
       });
     }
   }
+
+  // FIX MEDIUM: Return result object for user-facing warnings
+  return {
+    hasIssues: totalIssues > 0,
+    count: totalIssues
+  };
 }

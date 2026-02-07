@@ -91,15 +91,14 @@ export function createKickButtons(session, targetPlayers, canDoubleKick = false,
       .setStyle(ButtonStyle.Secondary)
   );
 
-  // Add double kick button if available
-  if (canDoubleKick) {
-    actionRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId(codec.forSession(session, 'doublekick', ''))
-        .setLabel(`🔥 طرد مرتين (${doubleKickCost})`)
-        .setStyle(ButtonStyle.Success)
-    );
-  }
+  // Always show double kick button; disable when balance is not enough.
+  actionRow.addComponents(
+    new ButtonBuilder()
+      .setCustomId(codec.forSession(session, 'doublekick', ''))
+      .setLabel(`🔥 طرد مرتين (${doubleKickCost})`)
+      .setStyle(canDoubleKick ? ButtonStyle.Success : ButtonStyle.Secondary)
+      .setDisabled(!canDoubleKick)
+  );
 
   rows.push(actionRow);
 

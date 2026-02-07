@@ -102,12 +102,15 @@ export default {
 
       // Try to DM the recipient
       try {
+        // FIX MEDIUM: Fetch fresh balance for DM to avoid stale data
+        const freshRecipientBalance = await CurrencyService.getBalance(recipient.id);
+
         const dmEmbed = new EmbedBuilder()
           .setColor(config.colors.success)
           .setTitle('📥 استلمت تحويلاً!')
           .setDescription(
             `استلمت **${formatNumber(amount)}** عملة آشي من ${interaction.user.toString()}\n\n` +
-            `💰 رصيدك الجديد: **${formatNumber(result.recipientBalance)}** عملة`
+            `💰 رصيدك الحالي: **${formatNumber(freshRecipientBalance)}** عملة`
           )
           .setTimestamp();
 

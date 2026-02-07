@@ -989,10 +989,31 @@ async function endGame(gameState) {
       roundsPlayed: TOTAL_ROUNDS
     });
 
+    // FIX CRITICAL: Verify payout succeeded before announcing reward
     if (rewardResult?.reward > 0) {
-      await gameState.channel.send({
-        content: `🪙 كل فائز حصل على **${rewardResult.reward}** عملة آشي!`,
-      });
+      const successfulPayouts = rewardResult.results?.filter(r => r.success === true)?.length || 0;
+      const totalWinners = rewardResult.results?.length || 0;
+
+      if (successfulPayouts > 0) {
+        if (successfulPayouts === totalWinners) {
+          // All winners paid successfully
+          await gameState.channel.send({
+            content: `🪙 كل فائز حصل على **${rewardResult.reward}** عملة آشي!`,
+          });
+        } else {
+          // Partial success - some payouts failed
+          await gameState.channel.send({
+            content: `⚠️ تم منح ${successfulPayouts} فائزين من أصل ${totalWinners}. يرجى التحقق من رصيدك.`
+          });
+          logger.error(`[Dice] Partial payout: ${successfulPayouts}/${totalWinners} succeeded`, rewardResult);
+        }
+      } else {
+        // All payouts failed
+        await gameState.channel.send({
+          content: `🏆 تم تتويج الفائزين!\n⚠️ حدث خطأ في منح الجائزة. يرجى التواصل مع الإدارة.`
+        });
+        logger.error(`[Dice] All winner payouts failed. Result:`, rewardResult);
+      }
     }
 
     // Record losses for losing team
