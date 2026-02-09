@@ -36,9 +36,10 @@ export const BETTER_LUCK_WEIGHTS = {
   6: 23,
 };
 
-// Timeouts
-export const TURN_TIMEOUT_MS = 20000; // 20 seconds for roll/skip decision
-export const BLOCK_TIMEOUT_MS = 15000; // 15 seconds to choose block target
+// Timeouts (centralized in timers.config.js)
+import { DICE_TIMERS } from '../../config/timers.config.js';
+export const TURN_TIMEOUT_MS = DICE_TIMERS.TURN_MS;
+export const BLOCK_TIMEOUT_MS = DICE_TIMERS.BLOCK_MS;
 
 // Game settings
 export const TOTAL_ROUNDS = 3;

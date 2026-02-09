@@ -12,7 +12,7 @@ import { EMBED_COLORS, PERKS, GAME_SETTINGS, getNumberEmoji } from './roulette.c
 /**
  * Create lobby embed showing available slots and current players
  */
-export function createLobbyEmbed(session, remainingSeconds) {
+export function createLobbyEmbed(session, remainingSeconds, countdownEndsAt = null) {
   const players = session.players || [];
 
   // Build player list with slot numbers
@@ -35,12 +35,21 @@ export function createLobbyEmbed(session, remainingSeconds) {
   // Available slots indicator
   const slotsStatus = `${players.length}/${GAME_SETTINGS.maxPlayers} لاعب`;
 
+  // Live countdown via Discord timestamp or fallback
+  let countdownText;
+  if (countdownEndsAt) {
+    const epochSeconds = Math.floor(countdownEndsAt / 1000);
+    countdownText = `⏱️ ستبدأ اللعبة <t:${epochSeconds}:R>`;
+  } else {
+    countdownText = `⏱️ تبقى **${remainingSeconds}** ثانية للانضمام`;
+  }
+
   const embed = new EmbedBuilder()
     .setTitle('🎡 روليت')
     .setDescription(
       `**عجلة الحظ!** اختر رقمك وانتظر بدء اللعبة.\n\n` +
       `اضغط على رقم للانضمام، أو "عشوائي" لاختيار رقم عشوائي.\n\n` +
-      `⏱️ تبقى **${remainingSeconds}** ثانية للانضمام`
+      countdownText
     )
     .addFields(
       {
@@ -123,12 +132,16 @@ export function createRoundEmbed(roundNumber, alivePlayers) {
 /**
  * Create "chosen" embed after wheel lands on a player
  */
-export function createChosenEmbed(player, roundNumber) {
+export function createChosenEmbed(player, roundNumber, discordTimestamp = null) {
+  const timeText = discordTimestamp
+    ? `لديك ${discordTimestamp} لاختيار لاعب لطرده.`
+    : `لديك **${GAME_SETTINGS.kickTimeout} ثانية** لاختيار لاعب لطرده.`;
+
   return new EmbedBuilder()
     .setTitle(`🎡 الجولة ${roundNumber}`)
     .setDescription(
       `${getNumberEmoji(player.slot)} **تم اختيارك!**\n\n` +
-      `<@${player.userId}> لديك **${GAME_SETTINGS.kickTimeout} ثانية** لاختيار لاعب لطرده.`
+      `<@${player.userId}> ${timeText}`
     )
     .setColor(EMBED_COLORS.kick);
 }
@@ -136,18 +149,22 @@ export function createChosenEmbed(player, roundNumber) {
 /**
  * Create kick selection embed
  */
-export function createKickSelectionEmbed(kickerPlayer, targetPlayers) {
+export function createKickSelectionEmbed(kickerPlayer, targetPlayers, discordTimestamp = null) {
   const targetsList = targetPlayers
     .map(p => `${getNumberEmoji(p.slot)} ${p.displayName}`)
     .join('\n');
 
-  const description = `<@${kickerPlayer.userId}> اختر لاعباً لطرده:\n\n${targetsList}`;
+  // Discord timestamps don't render in footer, so put countdown in description
+  const timeText = discordTimestamp
+    ? `\n\n⏱️ ${discordTimestamp} للاختيار أو ستُطرد أنت!`
+    : `\n\n⏱️ ${GAME_SETTINGS.kickTimeout} ثانية للاختيار أو ستُطرد أنت!`;
+
+  const description = `<@${kickerPlayer.userId}> اختر لاعباً لطرده:\n\n${targetsList}${timeText}`;
 
   return new EmbedBuilder()
     .setTitle('⚔️ اختر ضحيتك')
     .setDescription(description)
-    .setColor(EMBED_COLORS.kick)
-    .setFooter({ text: `⏱️ ${GAME_SETTINGS.kickTimeout} ثانية للاختيار أو ستُطرد أنت!` });
+    .setColor(EMBED_COLORS.kick);
 }
 
 /**

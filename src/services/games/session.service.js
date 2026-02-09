@@ -16,6 +16,7 @@ import { auditGameEvent } from './audit.service.js';
 const LOCK_TTL_MS = 2 * 1000;
 const LOCK_RETRY_DELAY_MS = 150;
 const SESSION_ARCHIVE_TTL_MS = 300 * 1000;
+const MAX_ARCHIVED_SESSIONS = 500;
 
 const liveSessions = new Map(); // sessionId -> session
 const archivedSessions = new Map(); // sessionId -> { session, expiresAt, timeout }
@@ -219,18 +220,40 @@ function persistLiveSessionUnsafe(session) {
   return copy;
 }
 
-const archiveSweepInterval = setInterval(() => {
+const maintenanceSweepInterval = setInterval(() => {
   const now = Date.now();
+
+  // Sweep expired archived sessions
   for (const [sessionId, archived] of archivedSessions.entries()) {
     if (archived.expiresAt <= now) {
       if (archived.timeout) clearTimeout(archived.timeout);
       archivedSessions.delete(sessionId);
     }
   }
-}, 60_000);
 
-if (typeof archiveSweepInterval.unref === 'function') {
-  archiveSweepInterval.unref();
+  // Cap archived sessions (evict oldest when over limit)
+  if (archivedSessions.size > MAX_ARCHIVED_SESSIONS) {
+    const excess = archivedSessions.size - MAX_ARCHIVED_SESSIONS;
+    let removed = 0;
+    for (const [sessionId, archived] of archivedSessions.entries()) {
+      if (removed >= excess) break;
+      if (archived.timeout) clearTimeout(archived.timeout);
+      archivedSessions.delete(sessionId);
+      removed++;
+    }
+    logger.warn(`[Session] Evicted ${removed} archived sessions (cap: ${MAX_ARCHIVED_SESSIONS})`);
+  }
+
+  // Sweep expired locks (prevents unbounded growth)
+  for (const [lockKey, expiresAt] of sessionLocks.entries()) {
+    if (expiresAt <= now) {
+      sessionLocks.delete(lockKey);
+    }
+  }
+}, 30_000);
+
+if (typeof maintenanceSweepInterval.unref === 'function') {
+  maintenanceSweepInterval.unref();
 }
 
 /**
@@ -363,11 +386,15 @@ export async function joinSession({ session: initialSession, user, member = null
   if (session.players.some((p) => p.userId === user.id)) return { error: 'ALREADY_IN_GAME' };
 
   const lockKey = `lock:${session.id}`;
+  const retryDelays = [50, 150, 300];
 
   let gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
   if (!gotLock) {
-    await sleep(LOCK_RETRY_DELAY_MS);
-    gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
+    for (const delayMs of retryDelays) {
+      await sleep(delayMs);
+      gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
+      if (gotLock) break;
+    }
     if (!gotLock) {
       return { error: 'BUSY_TRY_AGAIN' };
     }

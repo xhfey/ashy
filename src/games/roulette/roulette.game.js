@@ -34,6 +34,8 @@ import {
   GAME_SETTINGS,
   PERKS,
 } from './roulette.constants.js';
+import { ROULETTE_TIMERS } from '../../config/timers.config.js';
+import GameTimer from '../../utils/GameTimer.js';
 import * as Embeds from './roulette.embeds.js';
 import * as Buttons from './roulette.buttons.js';
 import * as PerksLogic from './roulette.perks.js';
@@ -119,10 +121,7 @@ const sessionLocks = new Map();
  */
 function changePhase(gameState, newPhase) {
   // Clear any pending timeout
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-    gameState.turnTimeout = null;
-  }
+  gameState.turnTimer.clear();
 
   // Update phase
   gameState.phase = newPhase;
@@ -142,20 +141,21 @@ async function withLock(sessionId, fn) {
   }
 
   // Chain our operation to the end of the queue
-  const result = lockQueue.then(fn).catch(error => {
+  // The swallowed promise prevents unhandled rejection from stalling the queue
+  const swallowed = lockQueue.then(fn).catch(error => {
     logger.error('[Roulette] Lock execution error:', error);
     throw error;
   });
 
-  // Update the queue to wait for our operation
-  sessionLocks.set(sessionId, result.catch(() => {})); // Catch to prevent unhandled rejection in queue
+  // Store the swallowed version (never rejects) so the queue always advances
+  const queued = swallowed.catch(() => {});
+  sessionLocks.set(sessionId, queued);
 
   try {
-    return await result;
+    return await swallowed;
   } finally {
-    // Clean up lock if queue is empty
-    const currentQueue = sessionLocks.get(sessionId);
-    if (currentQueue === result.catch(() => {})) {
+    // Only clean up if WE are still the tail of the queue
+    if (sessionLocks.get(sessionId) === queued) {
       sessionLocks.delete(sessionId);
     }
   }
@@ -323,7 +323,7 @@ export async function startRouletteGame(session, channel) {
       players,
       currentRound: 0,
       phase: 'PLAYING', // PLAYING, SPINNING, KICK_SELECTION, FINAL_ROUND, GAME_END
-      turnTimeout: null,
+      turnTimer: new GameTimer(),
       currentKickerId: null,
       doubleKickActive: false,
       doubleKickFirstTarget: null,
@@ -343,7 +343,7 @@ export async function startRouletteGame(session, channel) {
     // Announce game start
     const startEmbed = Embeds.createGameStartEmbed();
     await channel.send({ embeds: [startEmbed] });
-    await delay(2000);
+    await safeDelay(gameState, 2000);
 
     // Start first round
     await runSpinRound(gameState, session);
@@ -432,7 +432,7 @@ async function runSpinRound(gameState, session) {
   }
 
   // Wait for GIF animation only if GIF was posted
-  await delay(gifSent ? WHEEL_GIF_DURATION_MS : FALLBACK_SPIN_DELAY_MS);
+  await safeDelay(gameState, gifSent ? WHEEL_GIF_DURATION_MS : FALLBACK_SPIN_DELAY_MS);
 
   // Start kick selection
   await startKickSelection(gameState, session, chosenPlayer);
@@ -474,20 +474,32 @@ async function startKickSelection(gameState, session, kickerPlayer) {
   // Create kick selection buttons
   const kickButtons = Buttons.createKickButtons(session, targetPlayers, canBuy, PERKS.DOUBLE_KICK.cost);
 
+  // Start timer with warning + Discord timestamp
+  const { discordTimestamp } = gameState.turnTimer.start(
+    TURN_TIMEOUT_MS,
+    () => {
+      handleKickTimeout(gameState, session, kickerPlayer).catch(error => {
+        logger.error('[Roulette] Kick timeout error:', error);
+        cleanupGame(session.id);
+      });
+    },
+    {
+      label: 'Roulette-Kick',
+      warningMs: ROULETTE_TIMERS.WARNING_MS,
+      onWarning: () => {
+        if (gameState.phase === 'KICK_SELECTION' && gameState.currentKickerId === kickerPlayer.userId) {
+          gameState.channel.send({
+            content: `<@${kickerPlayer.userId}> ⚡ أسرع! الوقت يداهمك!`,
+          }).catch(() => {});
+        }
+      },
+    }
+  );
+
   await gameState.channel.send({
-    content: `<@${kickerPlayer.userId}> لديك ${GAME_SETTINGS.kickTimeout} ثانية لاختيار لاعب لطرده`,
+    content: `<@${kickerPlayer.userId}> لديك ${GAME_SETTINGS.kickTimeout} ثانية لاختيار لاعب لطرده ${discordTimestamp}`,
     components: kickButtons,
   });
-
-  // Set timeout for kick selection
-  // FIX DESIGN 3: Add .unref() to allow graceful shutdown
-  gameState.turnTimeout = setTimeout(() => {
-    handleKickTimeout(gameState, session, kickerPlayer).catch(error => {
-      logger.error('[Roulette] Kick timeout error:', error);
-      // Cleanup on critical error
-      cleanupGame(session.id);
-    });
-  }, TURN_TIMEOUT_MS).unref();
 }
 
 // ==================== TIMEOUT HANDLING ====================
@@ -498,12 +510,9 @@ async function startKickSelection(gameState, session, kickerPlayer) {
  */
 async function handleKickTimeout(gameState, session, kickerPlayer) {
   await withLock(session.id, async () => {
-    // FIX #25: Clear timeout FIRST to prevent any race conditions
-    if (gameState.turnTimeout) {
-      clearTimeout(gameState.turnTimeout);
-      gameState.turnTimeout = null;
-    }
-    
+    // Clear timer to prevent race conditions
+    gameState.turnTimer.clear();
+
     // Phase check
     if (gameState.phase !== 'KICK_SELECTION') return;
     if (gameState.currentKickerId !== kickerPlayer.userId) return;
@@ -542,10 +551,7 @@ async function handleKickTarget(ctx, gameState, targetId) {
   }
 
   // Clear timeout
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-    gameState.turnTimeout = null;
-  }
+  gameState.turnTimer.clear();
 
   // CRITICAL FIX: Find and validate target exists in game state
   const target = gameState.players.find(p => p.userId === targetId);
@@ -593,7 +599,7 @@ async function handleKickTarget(ctx, gameState, targetId) {
       return;
     } else {
       // Both survived (kicker used extra life)
-      await delay(RESULT_DELAY_MS);
+      await safeDelay(gameState, RESULT_DELAY_MS);
       gameState.currentKickerId = null;
 
       // Handle double kick if active
@@ -620,7 +626,7 @@ async function handleKickTarget(ctx, gameState, targetId) {
       return;
     }
 
-    await delay(RESULT_DELAY_MS);
+    await safeDelay(gameState, RESULT_DELAY_MS);
     gameState.currentKickerId = null;
     await runSpinRound(gameState, session);
     return;
@@ -657,7 +663,7 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
     gameState.doubleKickActive = false;
     gameState.doubleKickFirstTarget = null;
     gameState.currentKickerId = null;
-    await delay(RESULT_DELAY_MS);
+    await safeDelay(gameState, RESULT_DELAY_MS);
     await runSpinRound(gameState, session);
     return;
   }
@@ -677,29 +683,27 @@ async function promptSecondKick(gameState, session, kicker, firstTarget) {
   });
 
   // Set timeout for second kick
-  // FIX DESIGN 3: Add .unref() to allow graceful shutdown
-  gameState.turnTimeout = setTimeout(() => {
-    withLock(session.id, async () => {
-      // Skip second kick on timeout
-      if (gameState.turnTimeout) {
-        clearTimeout(gameState.turnTimeout);
-        gameState.turnTimeout = null;
-      }
+  gameState.turnTimer.start(
+    TURN_TIMEOUT_MS,
+    () => {
+      withLock(session.id, async () => {
+        gameState.turnTimer.clear();
 
-      gameState.doubleKickActive = false;
-      gameState.doubleKickFirstTarget = null;
-      gameState.currentKickerId = null;
+        gameState.doubleKickActive = false;
+        gameState.doubleKickFirstTarget = null;
+        gameState.currentKickerId = null;
 
-      await sessionManager.commit(session);
+        await sessionManager.commit(session);
 
-      await delay(RESULT_DELAY_MS);
-      await runSpinRound(gameState, session);
-    }).catch(error => {
-      logger.error('[Roulette] Double kick timeout error:', error);
-      // Cleanup on critical error
-      cleanupGame(session.id);
-    });
-  }, TURN_TIMEOUT_MS).unref();
+        await safeDelay(gameState, RESULT_DELAY_MS);
+        await runSpinRound(gameState, session);
+      }).catch(error => {
+        logger.error('[Roulette] Double kick timeout error:', error);
+        cleanupGame(session.id);
+      });
+    },
+    { label: 'Roulette-DoubleKick' }
+  );
 }
 
 /**
@@ -714,10 +718,7 @@ async function handleSecondKick(ctx, gameState, targetId) {
   }
 
   // Clear timeout
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-    gameState.turnTimeout = null;
-  }
+  gameState.turnTimer.clear();
 
   const target = gameState.players.find(p => p.userId === targetId);
   if (!target || !target.alive) {
@@ -774,7 +775,7 @@ async function handleSecondKick(ctx, gameState, targetId) {
     return;
   }
 
-  await delay(RESULT_DELAY_MS);
+  await safeDelay(gameState, RESULT_DELAY_MS);
   await runSpinRound(gameState, session);
 }
 
@@ -789,10 +790,7 @@ async function handleSelfKick(ctx, gameState) {
     return;
   }
 
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-    gameState.turnTimeout = null;
-  }
+  gameState.turnTimer.clear();
 
   await ctx.commit();
 
@@ -900,10 +898,7 @@ async function handleSkipDoubleKick(ctx, gameState) {
     return;
   }
 
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-    gameState.turnTimeout = null;
-  }
+  gameState.turnTimer.clear();
 
   await ctx.commit();
 
@@ -911,7 +906,7 @@ async function handleSkipDoubleKick(ctx, gameState) {
   gameState.doubleKickFirstTarget = null;
   gameState.currentKickerId = null;
 
-  await delay(RESULT_DELAY_MS);
+  await safeDelay(gameState, RESULT_DELAY_MS);
   await runSpinRound(gameState, session);
 }
 
@@ -1019,7 +1014,7 @@ async function eliminatePlayer(gameState, session, userId, reason = 'kicked') {
       cleanupGame(gameState.sessionId);
     }
   } else {
-    await delay(RESULT_DELAY_MS);
+    await safeDelay(gameState, RESULT_DELAY_MS);
     await runSpinRound(gameState, session);
   }
 }
@@ -1091,7 +1086,7 @@ async function runFinalRound(gameState, session, finalPlayers, depth = 0) {
   const finalEmbed = Embeds.createFinalRoundEmbed(finalPlayers[0], finalPlayers[1]);
   await gameState.channel.send({ embeds: [finalEmbed] });
 
-  await delay(2000);
+  await safeDelay(gameState, 2000);
 
   // Spin to select who gets to KICK (not who wins)
   const kickerIndex = randomInt(2);
@@ -1121,7 +1116,7 @@ async function runFinalRound(gameState, session, finalPlayers, depth = 0) {
     logger.warn(`[Roulette] Final wheel GIF unavailable: ${formatDiscordError(error)}`);
   }
 
-  await delay(gifSent ? WHEEL_GIF_DURATION_MS : FALLBACK_SPIN_DELAY_MS);
+  await safeDelay(gameState, gifSent ? WHEEL_GIF_DURATION_MS : FALLBACK_SPIN_DELAY_MS);
 
   // FIX #22: Process the kick with perks (Shield, Extra Life)
   // The kicker "kicks" the target, perks apply!
@@ -1145,7 +1140,7 @@ async function runFinalRound(gameState, session, finalPlayers, depth = 0) {
     } else {
       // Kicker survived with extra life - both still alive, spin again!
       await gameState.channel.send({ content: '🔄 لم يُقصى أحد! إعادة التدوير...' });
-      await delay(2000);
+      await safeDelay(gameState, 2000);
       await runFinalRound(gameState, session, gameState.players.filter(p => p.alive), depth + 1);
       return;
     }
@@ -1157,7 +1152,7 @@ async function runFinalRound(gameState, session, finalPlayers, depth = 0) {
       content: `❤️ <@${target.userId}> كان معه حياة إضافية ونجا من الطرد!`
     });
     await gameState.channel.send({ content: '🔄 لم يُقصى أحد! إعادة التدوير...' });
-    await delay(2000);
+    await safeDelay(gameState, 2000);
     await runFinalRound(gameState, session, gameState.players.filter(p => p.alive), depth + 1);
     return;
   }
@@ -1282,17 +1277,15 @@ export async function cancelRouletteGame(sessionId, reason = 'CANCELLED') {
 function cleanupGame(sessionId) {
   const gameState = activeGames.get(sessionId);
   if (gameState) {
-    // Clear turn timeout
-    if (gameState.turnTimeout) {
-      clearTimeout(gameState.turnTimeout);
-    }
-    // FIX DESIGN 2: Abort all pending delays
+    // Clear turn timer
+    gameState.turnTimer.clear();
+    // Abort all pending delays
     if (gameState.abortController) {
       gameState.abortController.abort();
     }
   }
   activeGames.delete(sessionId);
-  sessionLocks.delete(sessionId); // Also clean up any locks
+  sessionLocks.delete(sessionId);
 }
 
 /**

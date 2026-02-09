@@ -200,7 +200,7 @@ async function handleJoin(interaction, session, preferredSlot = null) {
 
   const remaining = SessionService.getRemainingCountdown(result.session);
   return interaction.message.edit({
-    embeds: [buildLobbyEmbed(result.session, remaining)],
+    embeds: [buildLobbyEmbed(result.session, remaining, result.session.countdownEndsAt)],
     components: buildLobbyComponents(result.session)
   });
 }
@@ -226,7 +226,7 @@ async function handleLeave(interaction, session) {
 
   const remaining = SessionService.getRemainingCountdown(result.session);
   return interaction.message.edit({
-    embeds: [buildLobbyEmbed(result.session, remaining)],
+    embeds: [buildLobbyEmbed(result.session, remaining, result.session.countdownEndsAt)],
     components: buildLobbyComponents(result.session)
   });
 }

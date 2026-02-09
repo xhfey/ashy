@@ -52,7 +52,7 @@ export default {
     const remaining = SessionService.getRemainingCountdown(session);
 
     const message = await interaction.reply({
-      embeds: [buildLobbyEmbed(session, remaining)],
+      embeds: [buildLobbyEmbed(session, remaining, session.countdownEndsAt)],
       components: buildLobbyComponents(session),
       fetchReply: true
     });

@@ -22,9 +22,12 @@ function getNumberEmoji(num) {
 }
 
 /**
- * Build lobby embed with countdown in footer
+ * Build lobby embed with countdown
+ * @param {Object} session
+ * @param {number|null} remainingSeconds - Fallback countdown (used if countdownEndsAt not provided)
+ * @param {number|null} countdownEndsAt - Deadline as Date.now()-style ms (enables Discord live timestamp)
  */
-export function buildLobbyEmbed(session, remainingSeconds = null) {
+export function buildLobbyEmbed(session, remainingSeconds = null, countdownEndsAt = null) {
   const game = GAMES[session.gameType];
 
   // Title
@@ -46,23 +49,20 @@ export function buildLobbyEmbed(session, remainingSeconds = null) {
     }
   }
 
+  // Live countdown via Discord timestamp (renders client-side, zero API calls)
+  if (countdownEndsAt) {
+    const epochSeconds = Math.floor(countdownEndsAt / 1000);
+    description += `\n⏱️ ستبدأ اللعبة <t:${epochSeconds}:R>`;
+  } else if (remainingSeconds !== null && remainingSeconds > 0) {
+    description += `\n⏱️ ستبدأ اللعبة بعد ${remainingSeconds} ثانية`;
+  } else if (remainingSeconds === 0) {
+    description += '\n⏳ جاري البدء...';
+  }
+
   const embed = new EmbedBuilder()
     .setColor(config.colors.primary)
     .setTitle(title)
     .setDescription(description);
-
-  // Footer with countdown (Fizbo style)
-  if (remainingSeconds !== null && remainingSeconds > 0) {
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('en-US', {
-      hour: 'numeric',
-      minute: '2-digit',
-      hour12: true
-    });
-    embed.setFooter({ text: `Today at ${timeStr} • ستبدأ اللعبة بعد ${remainingSeconds} ثانية` });
-  } else if (remainingSeconds === 0) {
-    embed.setFooter({ text: 'جاري البدء...' });
-  }
 
   return embed;
 }

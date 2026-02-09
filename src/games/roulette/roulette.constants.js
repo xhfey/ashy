@@ -19,11 +19,12 @@ export const GAME_SETTINGS = {
 };
 
 // ==================== TIMEOUT CONSTANTS ====================
-// FIX #28: Derive from GAME_SETTINGS to prevent sync issues
+// Centralized in timers.config.js, re-exported for backward compatibility
 
-export const TURN_TIMEOUT_MS = GAME_SETTINGS.kickTimeout * 1000;
-export const RESULT_DELAY_MS = 2000;     // 2 seconds before next turn
-export const CELEBRATION_DELAY_MS = 1500; // 1.5 seconds for celebration
+import { ROULETTE_TIMERS } from '../../config/timers.config.js';
+export const TURN_TIMEOUT_MS = ROULETTE_TIMERS.KICK_MS;
+export const RESULT_DELAY_MS = ROULETTE_TIMERS.RESULT_DELAY_MS;
+export const CELEBRATION_DELAY_MS = ROULETTE_TIMERS.CELEBRATION_DELAY_MS;
 
 // ==================== PERKS ====================
 

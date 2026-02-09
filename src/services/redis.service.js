@@ -14,17 +14,26 @@ const redis = new Redis({
 
 // ============ BASIC OPERATIONS ============
 
-export async function testConnection() {
-  try {
-    const start = Date.now();
-    await redis.ping();
-    const latency = Date.now() - start;
-    logger.info(`✅ Redis connected - Latency: ${latency}ms`);
-    return latency;
-  } catch (error) {
-    logger.error('❌ Redis connection failed:', error);
-    return -1;
+export async function testConnection({ retries = 5, baseDelayMs = 1000 } = {}) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const start = Date.now();
+      await redis.ping();
+      const latency = Date.now() - start;
+      logger.info(`✅ Redis connected - Latency: ${latency}ms`);
+      return latency;
+    } catch (error) {
+      const isLastAttempt = attempt === retries;
+      const delayMs = baseDelayMs * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s, 16s
+      if (isLastAttempt) {
+        logger.error(`❌ Redis connection failed after ${retries} attempts:`, error);
+        return -1;
+      }
+      logger.warn(`⚠️ Redis connection attempt ${attempt}/${retries} failed, retrying in ${delayMs}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
   }
+  return -1;
 }
 
 export async function get(key) {

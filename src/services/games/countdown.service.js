@@ -1,16 +1,18 @@
 /**
  * Countdown Service
  *
- * Manages game countdown timers
- * Extracted from play.js to allow proper imports
+ * Manages game countdown timers.
+ * Uses Discord relative timestamps (<t:EPOCH:R>) for live countdown display —
+ * the message is sent once and Discord renders the countdown client-side.
+ * Only a single setTimeout fires when the countdown expires to start the game.
  */
 
 import * as SessionService from './session.service.js';
-import { buildLobbyEmbed, buildLobbyComponents, buildCancelledMessage } from '../../utils/game-embeds.js';
+import { buildCancelledMessage } from '../../utils/game-embeds.js';
 import { cancelSessionEverywhere } from './cancellation.service.js';
 import logger from '../../utils/logger.js';
 
-// Track active countdowns
+// Track active countdowns (stores setTimeout IDs, not intervals)
 const activeCountdowns = new Map();
 const MAX_ACTIVE_COUNTDOWNS = 50;
 
@@ -19,17 +21,15 @@ const countdownMonitor = setInterval(() => {
   if (activeCountdowns.size > 20) {
     logger.warn(`[Countdown] High active countdown count: ${activeCountdowns.size}`);
   }
-  // Force cleanup if way too many (shouldn't happen with 60s failsafe)
   if (activeCountdowns.size > MAX_ACTIVE_COUNTDOWNS) {
     logger.error(`[Countdown] Exceeded max countdowns (${activeCountdowns.size}), forcing cleanup`);
-    for (const [id, interval] of activeCountdowns) {
-      clearInterval(interval);
+    for (const [id, timeoutId] of activeCountdowns) {
+      clearTimeout(timeoutId);
     }
     activeCountdowns.clear();
   }
 }, 60000);
 
-// Do not keep utility processes alive (deploy/tests/import checks).
 if (typeof countdownMonitor.unref === 'function') {
   countdownMonitor.unref();
 }
@@ -38,124 +38,110 @@ let gameRunnerPromise = null;
 async function getGameRunnerService() {
   if (!gameRunnerPromise) {
     gameRunnerPromise = import('./game-runner.service.js');
+    // Clear cache on failure so next call retries the import
+    gameRunnerPromise.catch(() => { gameRunnerPromise = null; });
   }
   return gameRunnerPromise;
 }
 
 /**
- * Start countdown for a session
+ * Start countdown for a session.
+ * No more interval-based message edits — Discord timestamps handle the visual countdown.
+ * A single setTimeout fires when the countdown expires to start (or cancel) the game.
  */
 export function startCountdown(client, sessionId, message) {
   // Clear existing countdown for this session
-  if (activeCountdowns.has(sessionId)) {
-    clearInterval(activeCountdowns.get(sessionId));
-    activeCountdowns.delete(sessionId);
-  }
+  stopCountdown(sessionId);
 
-  const interval = setInterval(async () => {
+  // Calculate remaining time from session's stored deadline
+  (async () => {
     try {
-      // Fetch fresh session
       const session = await SessionService.getSession(sessionId);
+      if (!session || session.status !== 'WAITING') return;
 
-      // Session gone or no longer waiting
-      if (!session || session.status !== 'WAITING') {
-        stopCountdown(sessionId);
-        return;
-      }
-
-      // Calculate remaining from stored timestamp (not local counter!)
       const remaining = SessionService.getRemainingCountdown(session);
+      if (remaining <= 0) return;
 
-      if (remaining <= 0) {
-        // Time's up!
-        stopCountdown(sessionId);
+      const delayMs = remaining * 1000;
 
-        // Try to start game
-        const startResult = await SessionService.startGame(session);
+      const timeout = setTimeout(async () => {
+        activeCountdowns.delete(sessionId);
 
-        if (startResult.error === 'NOT_ENOUGH_PLAYERS') {
-          try {
-            await message.edit({
-              content: buildCancelledMessage('NOT_ENOUGH_PLAYERS', startResult.required),
-              embeds: [],
-              components: []
-            });
-          } catch (e) {
-            logger.warn('[Countdown] Failed to edit cancellation message:', e?.message || e);
-          }
-          return;
-        }
+        try {
+          const freshSession = await SessionService.getSession(sessionId);
+          if (!freshSession || freshSession.status !== 'WAITING') return;
 
-        if (startResult.session) {
-          let started = false;
-          try {
-            const { startGameForSession } = await getGameRunnerService();
-            started = await startGameForSession(startResult.session, message.channel);
-          } catch (e) {
-            logger.warn('[Countdown] Failed to start game runtime:', e?.message || e);
-          }
+          // Try to start game
+          const startResult = await SessionService.startGame(freshSession);
 
-          if (!started) {
-            await cancelSessionEverywhere(startResult.session, 'NOT_IMPLEMENTED', { hardCleanup: true });
+          if (startResult.error === 'NOT_ENOUGH_PLAYERS') {
             try {
               await message.edit({
-                content: '🚫 | تم إلغاء اللعبة — هذا النمط غير متاح حالياً',
+                content: buildCancelledMessage('NOT_ENOUGH_PLAYERS', startResult.required),
                 embeds: [],
                 components: []
               });
             } catch (e) {
-              logger.warn('[Countdown] Failed to edit not-implemented message:', e?.message || e);
+              logger.warn('[Countdown] Failed to edit cancellation message:', e?.message || e);
             }
             return;
           }
 
-          try {
-            await message.edit({
-              content: `🎮 **بدأت اللعبة!** (${startResult.session.players.length} لاعبين)`,
-              embeds: [],
-              components: []
-            });
-          } catch (e) {
-            logger.warn('[Countdown] Failed to edit started message:', e?.message || e);
+          if (startResult.session) {
+            let started = false;
+            try {
+              const { startGameForSession } = await getGameRunnerService();
+              started = await startGameForSession(startResult.session, message.channel);
+            } catch (e) {
+              logger.warn('[Countdown] Failed to start game runtime:', e?.message || e);
+            }
+
+            if (!started) {
+              await cancelSessionEverywhere(startResult.session, 'NOT_IMPLEMENTED', { hardCleanup: true });
+              try {
+                await message.edit({
+                  content: '🚫 | تم إلغاء اللعبة — هذا النمط غير متاح حالياً',
+                  embeds: [],
+                  components: []
+                });
+              } catch (e) {
+                logger.warn('[Countdown] Failed to edit not-implemented message:', e?.message || e);
+              }
+              return;
+            }
+
+            try {
+              await message.edit({
+                content: `🎮 **بدأت اللعبة!** (${startResult.session.players.length} لاعبين)`,
+                embeds: [],
+                components: []
+              });
+            } catch (e) {
+              logger.warn('[Countdown] Failed to edit started message:', e?.message || e);
+            }
           }
+        } catch (error) {
+          logger.error('[Countdown] Countdown expire error:', error);
         }
-        return;
+      }, delayMs);
+
+      if (typeof timeout.unref === 'function') {
+        timeout.unref();
       }
 
-      // Update countdown display
-      try {
-        await message.edit({
-          embeds: [buildLobbyEmbed(session, remaining)],
-          components: buildLobbyComponents(session)
-        });
-      } catch (e) {
-        // Message deleted - cleanup
-        logger.debug('[Countdown] Message edit failed, cleaning up:', e?.message || e);
-        stopCountdown(sessionId);
-        await cancelSessionEverywhere(session, 'MESSAGE_DELETED', { hardCleanup: true });
-      }
+      activeCountdowns.set(sessionId, timeout);
 
-    } catch (error) {
-      logger.error('Countdown error:', error);
-      stopCountdown(sessionId);
-    }
-  }, 3000);
-
-  activeCountdowns.set(sessionId, interval);
-
-  // Failsafe: clear after countdown ends (+ small buffer)
-  // Prevents leaks while avoiding early stop if countdown is near 60s.
-  (async () => {
-    try {
-      const session = await SessionService.getSession(sessionId);
-      const remaining = session ? SessionService.getRemainingCountdown(session) : 60;
-      const failsafeMs = Math.max((remaining + 5) * 1000, 15000);
-      setTimeout(() => {
+      // Failsafe: clear after countdown + buffer
+      const failsafeMs = Math.max((remaining + 10) * 1000, 15000);
+      const failsafe = setTimeout(() => {
         stopCountdown(sessionId);
       }, failsafeMs);
+      if (typeof failsafe.unref === 'function') {
+        failsafe.unref();
+      }
+
     } catch (error) {
-      logger.error('Countdown failsafe error:', error);
-      setTimeout(() => stopCountdown(sessionId), 60000);
+      logger.error('[Countdown] Countdown start error:', error);
     }
   })();
 }
@@ -165,7 +151,7 @@ export function startCountdown(client, sessionId, message) {
  */
 export function stopCountdown(sessionId) {
   if (activeCountdowns.has(sessionId)) {
-    clearInterval(activeCountdowns.get(sessionId));
+    clearTimeout(activeCountdowns.get(sessionId));
     activeCountdowns.delete(sessionId);
   }
 }

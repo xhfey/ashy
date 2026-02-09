@@ -36,11 +36,22 @@ import {
   TURN_TIMEOUT_MS,
   BLOCK_TIMEOUT_MS,
 } from './dice.constants.js';
+import { DICE_TIMERS } from '../../config/timers.config.js';
+import GameTimer from '../../utils/GameTimer.js';
 import logger from '../../utils/logger.js';
 
 // Store active games (sessionId -> game state)
 const activeGames = new Map();
 const DECISION_FEEDBACK_DELAY_MS = 1200;
+
+/**
+ * Atomic phase transition — auto-clears turn and block timers.
+ */
+function changePhase(gameState, newPhase) {
+  gameState.turnTimer.clear();
+  gameState.blockTimer.clear();
+  gameState.phase = newPhase;
+}
 
 function formatMultiplierLine(multiplier, finalScore) {
   if (!Number.isFinite(multiplier) || multiplier === 1) return '';
@@ -112,7 +123,7 @@ async function handleRollAgainFromCtx(ctx, gameState) {
   }
 
   // Clear timeout
-  clearTimeout(gameState.turnTimeout);
+  gameState.turnTimer.clear();
 
   const currentPlayer = getCurrentPlayer(gameState);
   const firstRoll = gameState.turnState.firstRoll;
@@ -187,7 +198,7 @@ async function handleSkipFromCtx(ctx, gameState) {
   }
 
   // Clear timeout to avoid double-processing on edge timing
-  clearTimeout(gameState.turnTimeout);
+  gameState.turnTimer.clear();
 
   // Increment uiVersion for stale-click detection
   await bumpUiVersion(ctx, gameState);
@@ -223,7 +234,7 @@ async function handleBlockTargetFromCtx(ctx, gameState, targetId) {
     return;
   }
 
-  clearTimeout(gameState.blockTimeout);
+  gameState.blockTimer.clear();
 
   const currentPlayer = getCurrentPlayer(gameState);
   const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
@@ -334,8 +345,8 @@ export async function startDiceGame(session, channel) {
       turnState: null,
       blockedNextRound: { A: [], B: [] },
       messageId: null, // Current game message
-      turnTimeout: null,
-      blockTimeout: null,
+      turnTimer: new GameTimer(),
+      blockTimer: new GameTimer(),
       cancelled: false,
       uiVersion: session.uiVersion || 0, // For v1 button stale-click detection
     };
@@ -397,7 +408,7 @@ async function startRound(gameState) {
   applyBlocks(gameState);
 
   // Start Team A silently (no round announcement)
-  gameState.phase = 'TEAM_A';
+  changePhase(gameState, 'TEAM_A');
   gameState.currentPlayerIndex = 0;
   await processNextTurn(gameState);
 }
@@ -447,7 +458,7 @@ async function processNextTurn(gameState) {
   if (gameState.currentPlayerIndex >= currentTeam.length) {
     if (gameState.phase === 'TEAM_A') {
       // Switch to Team B silently (no announcement)
-      gameState.phase = 'TEAM_B';
+      changePhase(gameState, 'TEAM_B');
       gameState.currentPlayerIndex = 0;
       await processNextTurn(gameState);
     } else {
@@ -480,10 +491,8 @@ async function processNextTurn(gameState) {
  */
 async function startPlayerTurn(gameState, player) {
   if (isGameCancelled(gameState)) return;
-  // Clear any previous timeout
-  if (gameState.turnTimeout) {
-    clearTimeout(gameState.turnTimeout);
-  }
+  // Clear any previous timers
+  gameState.turnTimer.clear();
 
   // Roll first die
   const firstRoll = rollDie(player.hasBetterLuck);
@@ -506,24 +515,38 @@ async function startPlayerTurn(gameState, player) {
   // Build message with buttons
   const row = buildDecisionButtons(gameState);
 
-  // PLAIN TEXT - NO EMBED
+  // Start timer with warning + Discord timestamp
+  const { discordTimestamp } = gameState.turnTimer.start(
+    TURN_TIMEOUT_MS,
+    () => {
+      if (gameState.turnState?.waiting === 'DECISION') {
+        void handleSkip(gameState, player, null, true).catch(error => {
+          handleGameError(gameState, error, 'turnTimeout');
+        });
+      }
+    },
+    {
+      label: 'Dice-Turn',
+      warningMs: DICE_TIMERS.WARNING_MS,
+      onWarning: () => {
+        if (gameState.turnState?.waiting === 'DECISION') {
+          gameState.channel.send({
+            content: `<@${player.userId}> ⚡ أسرع! الوقت يداهمك!`,
+          }).catch(() => {});
+        }
+      },
+    }
+  );
+
+  // PLAIN TEXT - NO EMBED (includes live Discord countdown)
   const message = await gameState.channel.send({
-    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore + turnScore)}`,
+    content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore + turnScore)}\n⏱️ ${discordTimestamp}`,
     files: [attachment],
     components: [row],
   });
 
   gameState.messageId = message.id;
   gameState.currentMessage = message;
-
-  // Set timeout
-  gameState.turnTimeout = setTimeout(() => {
-    if (gameState.turnState?.waiting === 'DECISION') {
-      void handleSkip(gameState, player, message, true).catch(error => {
-        handleGameError(gameState, error, 'turnTimeout');
-      });
-    }
-  }, TURN_TIMEOUT_MS);
 }
 
 /**
@@ -533,7 +556,7 @@ export async function handleSkip(gameState, player, message, wasTimeout = false)
   try {
     if (isGameCancelled(gameState)) return;
     // Clear timeout
-    clearTimeout(gameState.turnTimeout);
+    gameState.turnTimer.clear();
 
     const firstRoll = gameState.turnState.firstRoll;
     const turnScore = applyMultiplier(firstRoll, player.scoreMultiplier);
@@ -703,41 +726,53 @@ async function handleBlock(interaction, gameState, player, firstRoll, attachment
   gameState.turnState.waiting = 'BLOCK_TARGET';
   gameState.turnState.firstRoll = firstRoll; // Keep first roll as score
 
-  // PLAIN TEXT - NO EMBED
+  // Start block timer with warning + Discord timestamp
+  const { discordTimestamp: blockTs } = gameState.blockTimer.start(
+    BLOCK_TIMEOUT_MS,
+    () => {
+      if (gameState.turnState?.waiting === 'BLOCK_TARGET') {
+        if (isGameCancelled(gameState)) return;
+        void (async () => {
+          const targetPool = availableTargets.length > 0 ? availableTargets : oppositeTeam;
+          const randomTarget = targetPool[randomInt(targetPool.length)];
+          try {
+            await gameState.currentMessage.edit({
+              content: `⏱️ ${MESSAGES.TIMEOUT_AUTO_BLOCK}\n✅ ${MESSAGES.BLOCKED_PLAYER(`<@${randomTarget.userId}>`)}`,
+              components: [],
+            });
+          } catch (error) {
+            logger.warn('[Dice] Failed to update message on auto-block:', error.message);
+          }
+
+          await applyBlock(gameState, player, randomTarget, teamLetter, true, false);
+        })().catch(error => {
+          handleGameError(gameState, error, 'blockTimeout');
+        });
+      }
+    },
+    {
+      label: 'Dice-Block',
+      warningMs: DICE_TIMERS.WARNING_MS,
+      onWarning: () => {
+        if (gameState.turnState?.waiting === 'BLOCK_TARGET') {
+          gameState.channel.send({
+            content: `<@${player.userId}> ⚡ أسرع! اختر لاعب!`,
+          }).catch(() => {});
+        }
+      },
+    }
+  );
+
+  // PLAIN TEXT - NO EMBED (includes live Discord countdown)
   const channel = interaction.channel || gameState.channel;
   const blockMessage = await channel.send({
-    content: `<@${player.userId}>\n${MESSAGES.GOT_BLOCK}\n${MESSAGES.CHOOSE_BLOCK_TARGET}`,
+    content: `<@${player.userId}>\n${MESSAGES.GOT_BLOCK}\n${MESSAGES.CHOOSE_BLOCK_TARGET}\n⏱️ ${blockTs}`,
     files: [attachment],
     components: rows.slice(0, 5),
   });
 
   gameState.messageId = blockMessage.id;
   gameState.currentMessage = blockMessage;
-
-  // Timeout for block selection
-  gameState.blockTimeout = setTimeout(() => {
-    if (gameState.turnState?.waiting === 'BLOCK_TARGET') {
-      if (isGameCancelled(gameState)) return;
-      void (async () => {
-        // Auto-select random
-        const targetPool = availableTargets.length > 0 ? availableTargets : oppositeTeam;
-        const randomTarget = targetPool[randomInt(targetPool.length)];
-        try {
-          // PLAIN TEXT - NO EMBED
-          await gameState.currentMessage.edit({
-            content: `⏱️ ${MESSAGES.TIMEOUT_AUTO_BLOCK}\n✅ ${MESSAGES.BLOCKED_PLAYER(`<@${randomTarget.userId}>`)}`,
-            components: [],
-          });
-        } catch (error) {
-          logger.warn('[Dice] Failed to update message on auto-block:', error.message);
-        }
-
-        await applyBlock(gameState, player, randomTarget, teamLetter, true, false);
-      })().catch(error => {
-        handleGameError(gameState, error, 'blockTimeout');
-      });
-    }
-  }, BLOCK_TIMEOUT_MS);
 }
 
 /**
@@ -885,7 +920,7 @@ async function advanceToNextTurn(gameState) {
  */
 async function endRound(gameState) {
   if (isGameCancelled(gameState)) return;
-  gameState.phase = 'ROUND_END';
+  changePhase(gameState, 'ROUND_END');
 
   const teamAScore = calculateTeamRoundScore(gameState.teamA, gameState.round - 1);
   const teamBScore = calculateTeamRoundScore(gameState.teamB, gameState.round - 1);
@@ -924,7 +959,7 @@ async function endRound(gameState) {
  */
 async function endGame(gameState) {
   if (isGameCancelled(gameState)) return;
-  gameState.phase = 'GAME_END';
+  changePhase(gameState, 'GAME_END');
 
   const teamATotal = calculateTeamScore(gameState.teamA);
   const teamBTotal = calculateTeamScore(gameState.teamB);
@@ -973,71 +1008,86 @@ async function endGame(gameState) {
   const totalPlayers = gameState.teamA.length + gameState.teamB.length;
   const statsMetadata = { sessionId: gameState.sessionId, playerCount: totalPlayers, roundsPlayed: TOTAL_ROUNDS };
 
-  if (winner !== 'TIE') {
-    const winnerIds = winner === 'A'
-      ? gameState.teamA.map(p => p.userId)
-      : gameState.teamB.map(p => p.userId);
-    const loserIds = winner === 'A'
-      ? gameState.teamB.map(p => p.userId)
-      : gameState.teamA.map(p => p.userId);
+  try {
+    if (winner !== 'TIE') {
+      const winnerIds = winner === 'A'
+        ? gameState.teamA.map(p => p.userId)
+        : gameState.teamB.map(p => p.userId);
+      const loserIds = winner === 'A'
+        ? gameState.teamB.map(p => p.userId)
+        : gameState.teamA.map(p => p.userId);
 
-    const rewardResult = await awardGameWinners({
-      gameType: 'DICE',
-      sessionId: gameState.sessionId,
-      winnerIds,
-      playerCount: totalPlayers,
-      roundsPlayed: TOTAL_ROUNDS
-    });
-
-    // FIX CRITICAL: Verify payout succeeded before announcing reward
-    if (rewardResult?.reward > 0) {
-      const successfulPayouts = rewardResult.results?.filter(r => r.success === true)?.length || 0;
-      const totalWinners = rewardResult.results?.length || 0;
-
-      if (successfulPayouts > 0) {
-        if (successfulPayouts === totalWinners) {
-          // All winners paid successfully
-          await gameState.channel.send({
-            content: `🪙 كل فائز حصل على **${rewardResult.reward}** عملة آشي!`,
-          });
-        } else {
-          // Partial success - some payouts failed
-          await gameState.channel.send({
-            content: `⚠️ تم منح ${successfulPayouts} فائزين من أصل ${totalWinners}. يرجى التحقق من رصيدك.`
-          });
-          logger.error(`[Dice] Partial payout: ${successfulPayouts}/${totalWinners} succeeded`, rewardResult);
-        }
-      } else {
-        // All payouts failed
-        await gameState.channel.send({
-          content: `🏆 تم تتويج الفائزين!\n⚠️ حدث خطأ في منح الجائزة. يرجى التواصل مع الإدارة.`
+      // Rewards: isolated so stats still record if this throws
+      try {
+        const rewardResult = await awardGameWinners({
+          gameType: 'DICE',
+          sessionId: gameState.sessionId,
+          winnerIds,
+          playerCount: totalPlayers,
+          roundsPlayed: TOTAL_ROUNDS
         });
-        logger.error(`[Dice] All winner payouts failed. Result:`, rewardResult);
+
+        // FIX CRITICAL: Verify payout succeeded before announcing reward
+        if (rewardResult?.reward > 0) {
+          const successfulPayouts = rewardResult.results?.filter(r => r.success === true)?.length || 0;
+          const totalWinners = rewardResult.results?.length || 0;
+
+          if (successfulPayouts > 0) {
+            if (successfulPayouts === totalWinners) {
+              await gameState.channel.send({
+                content: `🪙 كل فائز حصل على **${rewardResult.reward}** عملة آشي!`,
+              });
+            } else {
+              await gameState.channel.send({
+                content: `⚠️ تم منح ${successfulPayouts} فائزين من أصل ${totalWinners}. يرجى التحقق من رصيدك.`
+              });
+              logger.error(`[Dice] Partial payout: ${successfulPayouts}/${totalWinners} succeeded`, rewardResult);
+            }
+          } else {
+            await gameState.channel.send({
+              content: `🏆 تم تتويج الفائزين!\n⚠️ حدث خطأ في منح الجائزة. يرجى التواصل مع الإدارة.`
+            });
+            logger.error(`[Dice] All winner payouts failed. Result:`, rewardResult);
+          }
+        }
+      } catch (error) {
+        logger.error('[Dice] Reward payout failed:', error);
+        try {
+          await gameState.channel.send({
+            content: `🏆 تم تتويج الفائزين!\n⚠️ حدث خطأ في منح الجائزة. يرجى التواصل مع الإدارة.`
+          });
+        } catch (e) {
+          logger.warn('[Dice] Failed to send reward error message:', e.message);
+        }
       }
+
+      // Record losses (allSettled = never throws)
+      await Promise.allSettled(
+        loserIds.map(id => recordGameResult(id, 'DICE', 'LOSS', statsMetadata))
+      );
+    } else {
+      const allPlayerIds = [
+        ...gameState.teamA.map(p => p.userId),
+        ...gameState.teamB.map(p => p.userId),
+      ];
+      await Promise.allSettled(
+        allPlayerIds.map(id => recordGameResult(id, 'DICE', 'TIE', statsMetadata))
+      );
     }
 
-    // Record losses for losing team
-    await Promise.allSettled(
-      loserIds.map(id => recordGameResult(id, 'DICE', 'LOSS', statsMetadata))
-    );
-  } else {
-    // Tie: record participation for all players (no win/loss)
-    const allPlayerIds = [
-      ...gameState.teamA.map(p => p.userId),
-      ...gameState.teamB.map(p => p.userId),
-    ];
-    await Promise.allSettled(
-      allPlayerIds.map(id => recordGameResult(id, 'DICE', 'TIE', statsMetadata))
-    );
+    try {
+      await SessionService.endSession(gameState.sessionId, null, 'COMPLETED');
+    } catch (error) {
+      logger.error('[Dice] Failed to end session:', error);
+    }
+
+    logger.info(`Dice game ended: ${gameState.sessionId} - Winner: Team ${winner}`);
+  } finally {
+    // ALWAYS cleanup timers + activeGames, even if rewards/session end throws
+    gameState.turnTimer.clear();
+    gameState.blockTimer.clear();
+    activeGames.delete(gameState.sessionId);
   }
-
-  // Cleanup
-  activeGames.delete(gameState.sessionId);
-  clearTimeout(gameState.turnTimeout);
-  clearTimeout(gameState.blockTimeout);
-  await SessionService.endSession(gameState.sessionId, null, 'COMPLETED');
-
-  logger.info(`Dice game ended: ${gameState.sessionId} - Winner: Team ${winner}`);
 }
 
 /**
@@ -1094,8 +1144,8 @@ export function cancelDiceGame(sessionId, reason = 'MESSAGE_DELETED') {
   if (!gameState) return false;
 
   gameState.cancelled = true;
-  clearTimeout(gameState.turnTimeout);
-  clearTimeout(gameState.blockTimeout);
+  gameState.turnTimer.clear();
+  gameState.blockTimer.clear();
   activeGames.delete(sessionId);
 
   logger.info(`Dice game cancelled: ${sessionId} - Reason: ${reason}`);

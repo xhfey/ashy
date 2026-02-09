@@ -22,10 +22,16 @@ const logger = winston.createLogger({
   transports: [
     new winston.transports.File({
       filename: path.join(logsDir, 'error.log'),
-      level: 'error'
+      level: 'error',
+      maxsize: 50 * 1024 * 1024, // 50 MB per file
+      maxFiles: 5,                // Keep 5 rotated files
+      tailable: true,
     }),
     new winston.transports.File({
-      filename: path.join(logsDir, 'combined.log')
+      filename: path.join(logsDir, 'combined.log'),
+      maxsize: 50 * 1024 * 1024, // 50 MB per file
+      maxFiles: 10,               // Keep 10 rotated files
+      tailable: true,
     })
   ]
 });
