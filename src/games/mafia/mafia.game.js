@@ -19,13 +19,15 @@ import { calculateReward } from '../../services/economy/rewards.service.js';
 import { recordGameResult } from '../../services/economy/transaction.service.js';
 import { buttonRouter, sessionManager } from '../../framework/index.js';
 import { TimeoutManager } from '../../framework/TimeoutManager.js';
+import { AttachmentBuilder } from 'discord.js';
 import * as Buttons from './mafia.buttons.js';
 import * as Embeds from './mafia.embeds.js';
+import { generateTeamsBanner, generateWinBanner } from './mafia.images.js';
 import {
   ROLES, ROLE_NAMES, ROLE_EMOJIS, ROLE_DISTRIBUTIONS,
   PHASES, NIGHT_PHASES, ACTIONS, TIMERS, MESSAGES,
   TEAMS, getTeam,
-  HINT_COST, MAX_HINTS_PER_ROUND, DEAD_WINNER_RATIO,
+  HINT_COST, MAX_HINTS_PER_PLAYER_PER_ROUND, DEAD_WINNER_RATIO,
   VOTE_EDIT_THROTTLE_MS,
 } from './mafia.constants.js';
 import logger from '../../utils/logger.js';
@@ -66,6 +68,7 @@ async function withLock(sessionId, fn) {
 export function registerMafiaHandler() {
   buttonRouter.register('MAFIA', {
     onAction: handleMafiaAction,
+    concurrency: 'queue',
   });
   logger.info('[Mafia] Handler registered with ButtonRouter');
 }
@@ -134,6 +137,7 @@ export async function startMafiaGame(session, channel) {
       mafiaVotes: new Map(),
       doctorProtectUserId: null,
       detectiveInvestigateUserId: null,
+      detectiveLastResultText: null,
 
       // Night resolved
       resolvedMafiaTarget: null,
@@ -141,7 +145,9 @@ export async function startMafiaGame(session, channel) {
 
       // Day votes (reset each round)
       dayVotes: new Map(),
-      hintPurchasesThisRound: new Set(),
+      hintPurchasesThisRound: new Map(),
+      lastVoteOutcome: null,
+      lastVoteExpelledUserId: null,
 
       // Doctor restriction (persists across rounds)
       lastDoctorProtectedUserId: null,
@@ -166,13 +172,19 @@ export async function startMafiaGame(session, channel) {
 
     // Update session phase
     session.phase = PHASES.ROLE_REVEAL;
-    await sessionManager.save(session);
+    await persistMafiaState(gs, session);
 
     // 1. Announce role distribution
     await channel.send({ content: MESSAGES.ROLES_DISTRIBUTED });
 
-    // 2. Post team distribution text
-    await channel.send({ content: Embeds.buildTeamsText(distribution, detectiveEnabled) });
+    // 2. Post team distribution (image with text fallback)
+    const bannerBuf = await generateTeamsBanner(distribution, detectiveEnabled);
+    if (bannerBuf) {
+      const attachment = new AttachmentBuilder(bannerBuf, { name: 'teams.png' });
+      await channel.send({ content: MESSAGES.TEAMS_CAPTION, files: [attachment] });
+    } else {
+      await channel.send({ content: Embeds.buildTeamsText(distribution, detectiveEnabled) });
+    }
 
     // 3. Post control panel (this becomes the session anchor)
     const controlPanelMsg = await channel.send({
@@ -181,7 +193,9 @@ export async function startMafiaGame(session, channel) {
     });
 
     gs.controlPanelMessageId = controlPanelMsg.id;
+    session.messageId = controlPanelMsg.id;
     await SessionService.setMessageId(session.id, controlPanelMsg.id);
+    await persistMafiaState(gs, session);
 
     // Brief pause before starting first round
     await delay(TIMERS.ROLE_REVEAL_MS, abortController.signal);
@@ -241,10 +255,13 @@ function resetRoundState(gs) {
   gs.mafiaVotes.clear();
   gs.doctorProtectUserId = null;
   gs.detectiveInvestigateUserId = null;
+  gs.detectiveLastResultText = null;
   gs.resolvedMafiaTarget = null;
   gs.resolvedDoctorProtect = null;
   gs.dayVotes.clear();
   gs.hintPurchasesThisRound.clear();
+  gs.lastVoteOutcome = null;
+  gs.lastVoteExpelledUserId = null;
   gs.voteMessageId = null;
 
   if (gs.pendingVoteUpdate) {
@@ -256,32 +273,21 @@ function resetRoundState(gs) {
 // ==================== NIGHT PHASES ====================
 
 async function runNightMafia(gs, session) {
-  return runTimedPhase(gs, session, PHASES.NIGHT_MAFIA, TIMERS.NIGHT_MAFIA_MS, () => {
+  return runTimedPhase(gs, session, PHASES.NIGHT_MAFIA, TIMERS.NIGHT_MAFIA_MS, (epoch) => {
     // Edit control panel
-    return updateControlPanel(gs, session, MESSAGES.NIGHT_MAFIA_STATUS);
+    return updateControlPanel(gs, session, `${MESSAGES.NIGHT_MAFIA_STATUS}\n${MESSAGES.TIMER(epoch)}`);
   });
 }
 
 async function runNightDoctor(gs, session) {
-  // Skip if doctor is dead
-  const doctorId = findPlayerByRole(gs, ROLES.DOCTOR);
-  if (!doctorId || !gs.players[doctorId].alive) {
-    gs.resolvedDoctorProtect = null;
-    // Brief status message
-    await updateControlPanel(gs, session, MESSAGES.NIGHT_DOCTOR_STATUS);
-    await delay(TIMERS.RESOLVE_DELAY_MS, gs.abortController.signal);
-    await updateControlPanel(gs, session, MESSAGES.DOCTOR_CHOSE);
-    return;
-  }
-
-  return runTimedPhase(gs, session, PHASES.NIGHT_DOCTOR, TIMERS.NIGHT_DOCTOR_MS, () => {
-    return updateControlPanel(gs, session, MESSAGES.NIGHT_DOCTOR_STATUS);
+  return runTimedPhase(gs, session, PHASES.NIGHT_DOCTOR, TIMERS.NIGHT_DOCTOR_MS, (epoch) => {
+    return updateControlPanel(gs, session, `${MESSAGES.NIGHT_DOCTOR_STATUS}\n${MESSAGES.TIMER(epoch)}`);
   });
 }
 
 async function runNightDetective(gs, session) {
-  return runTimedPhase(gs, session, PHASES.NIGHT_DETECTIVE, TIMERS.NIGHT_DETECTIVE_MS, () => {
-    return updateControlPanel(gs, session, MESSAGES.NIGHT_DETECTIVE_STATUS);
+  return runTimedPhase(gs, session, PHASES.NIGHT_DETECTIVE, TIMERS.NIGHT_DETECTIVE_MS, (epoch) => {
+    return updateControlPanel(gs, session, `${MESSAGES.NIGHT_DETECTIVE_STATUS}\n${MESSAGES.TIMER(epoch)}`);
   });
 }
 
@@ -296,9 +302,10 @@ async function runTimedPhase(gs, session, phase, durationMs, setupFn) {
   gs.currentPhaseResolve = resolve;
   gs.phaseStartedAt = Date.now();
   await changePhase(gs, session, phase);
+  const epoch = getPhaseEndEpoch(durationMs);
 
   try {
-    await setupFn();
+    await setupFn(epoch);
   } catch (error) {
     logger.error(`[Mafia] Error setting up phase ${phase}:`, error);
   }
@@ -306,8 +313,11 @@ async function runTimedPhase(gs, session, phase, durationMs, setupFn) {
   gs.timeouts.set('phase', durationMs, async () => {
     await withLock(session.id, async () => {
       if (gs.phase !== phase) return; // Already moved on
-      await onPhaseTimeout(gs, session, phase);
-      resolve();
+      try {
+        await onPhaseTimeout(gs, session, phase);
+      } finally {
+        resolveCurrentPhaseWait(gs);
+      }
     });
   });
 
@@ -375,6 +385,8 @@ async function resolveNight(gs, session) {
     gs.lastDoctorProtectedUserId = gs.resolvedDoctorProtect;
   }
 
+  await persistMafiaState(gs, session);
+
   // Win check
   const winResult = checkWinCondition(gs);
   if (winResult) {
@@ -418,6 +430,7 @@ async function runDayVote(gs, session) {
       components: Buttons.buildDayVoteButtons(session, alivePlayers, voteCounts),
     });
     gs.voteMessageId = voteMsg.id;
+    await persistMafiaState(gs, session);
   } catch (error) {
     logger.error('[Mafia] Failed to send vote message:', error);
   }
@@ -425,7 +438,7 @@ async function runDayVote(gs, session) {
   gs.timeouts.set('phase', TIMERS.DAY_VOTE_MS, async () => {
     await withLock(session.id, async () => {
       if (gs.phase !== PHASES.DAY_VOTE) return;
-      resolve();
+      resolveCurrentPhaseWait(gs);
     });
   });
 
@@ -447,20 +460,35 @@ async function resolveVote(gs, session) {
 
   switch (result.outcome) {
     case 'SKIP':
+      gs.lastVoteOutcome = 'SKIP';
+      gs.lastVoteExpelledUserId = null;
       await gs.channel.send({ content: MESSAGES.VOTE_SKIP });
       break;
     case 'TIE':
+      gs.lastVoteOutcome = 'TIE';
+      gs.lastVoteExpelledUserId = null;
       await gs.channel.send({ content: MESSAGES.VOTE_TIE });
       break;
     case 'EXPEL': {
       const expelled = gs.players[result.expelledId];
+      if (!expelled || !expelled.alive) {
+        logger.warn(`[Mafia] Invalid expel target during vote resolve: ${result.expelledId}`);
+        gs.lastVoteOutcome = 'TIE';
+        gs.lastVoteExpelledUserId = null;
+        await gs.channel.send({ content: MESSAGES.VOTE_TIE });
+        break;
+      }
       expelled.alive = false;
       const mention = `<@${result.expelledId}>`;
       const roleName = ROLE_NAMES[expelled.role];
+      gs.lastVoteOutcome = 'EXPEL';
+      gs.lastVoteExpelledUserId = result.expelledId;
       await gs.channel.send({ content: MESSAGES.VOTE_EXPEL(mention, roleName) });
       break;
     }
   }
+
+  await persistMafiaState(gs, session);
 
   // Win check
   const winResult = checkWinCondition(gs);
@@ -491,6 +519,7 @@ async function endMafiaGame(gs, session, winResult) {
   gs.state = 'ENDED';
   gs.phase = PHASES.ENDED;
   gs.timeouts.clearAll();
+  resolveCurrentPhaseWait(gs);
 
   const { winningTeam } = winResult;
   const allPlayers = Object.values(gs.players);
@@ -526,11 +555,20 @@ async function endMafiaGame(gs, session, winResult) {
     }))
   );
 
-  // Post win announcement
+  // Post win announcement (image + text fallback)
   const winnerMentions = winners.map(w => `<@${w.userId}>`);
-  await gs.channel.send({
-    content: Embeds.buildWinText(winningTeam, winnerMentions, gs.roundNumber),
-  });
+  const winBannerBuf = await generateWinBanner(winningTeam, allPlayers, gs.roundNumber);
+  if (winBannerBuf) {
+    const winAttachment = new AttachmentBuilder(winBannerBuf, { name: 'win-banner.png' });
+    await gs.channel.send({
+      content: Embeds.buildWinText(winningTeam, winnerMentions, gs.roundNumber),
+      files: [winAttachment],
+    });
+  } else {
+    await gs.channel.send({
+      content: Embeds.buildWinText(winningTeam, winnerMentions, gs.roundNumber),
+    });
+  }
 
   // Edit control panel to ended state
   try {
@@ -545,6 +583,7 @@ async function endMafiaGame(gs, session, winResult) {
 
   // End session
   try {
+    await persistMafiaState(gs, session);
     await SessionService.endSession(gs.sessionId, null, 'COMPLETED');
   } catch (error) {
     logger.error('[Mafia] Failed to end session:', error);
@@ -640,9 +679,10 @@ async function handleNightOpen(ctx, gs) {
     const targets = getAlivePlayers(gs).filter(p => p.userId !== userId);
     const currentPick = gs.detectiveInvestigateUserId || null;
     const pickMention = currentPick ? `<@${currentPick}>` : null;
+    const lastResult = MESSAGES.DETECTIVE_LAST_RESULT(gs.detectiveLastResultText);
 
     return interaction.followUp({
-      content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
+      content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}\n${lastResult}`,
       components: Buttons.buildNightTargetButtons(session, targets, currentPick, ACTIONS.DETECTIVE_CHECK),
       ephemeral: true,
     });
@@ -653,63 +693,109 @@ async function handleNightOpen(ctx, gs) {
 }
 
 async function handleMafiaVote(ctx, gs, targetId) {
-  const { interaction } = ctx;
+  const { interaction, session } = ctx;
   const userId = interaction.user.id;
   const player = gs.players[userId];
 
-  if (!player || !player.alive || player.role !== ROLES.MAFIA) return;
-  if (gs.phase !== PHASES.NIGHT_MAFIA) return;
+  if (!player) {
+    return interaction.followUp({ content: MESSAGES.NOT_IN_GAME, ephemeral: true });
+  }
+  if (!player.alive) {
+    return interaction.followUp({ content: MESSAGES.DEAD_BLOCKED, ephemeral: true });
+  }
+  if (player.role !== ROLES.MAFIA) {
+    return interaction.followUp({ content: MESSAGES.NOT_YOUR_TURN, ephemeral: true });
+  }
+  if (gs.phase !== PHASES.NIGHT_MAFIA) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   // Validate target is alive and non-mafia
   const target = gs.players[targetId];
-  if (!target || !target.alive || target.role === ROLES.MAFIA) return;
+  if (!target || !target.alive || target.role === ROLES.MAFIA) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   gs.mafiaVotes.set(userId, targetId);
+  const targets = getAliveNonMafia(gs);
+  const pickMention = `<@${targetId}>`;
 
-  return interaction.followUp({
-    content: MESSAGES.VOTE_CONFIRMED(`<@${targetId}>`),
-    ephemeral: true,
+  return interaction.editReply({
+    content: `${MESSAGES.MAFIA_ACTION_TITLE}\n${MESSAGES.MAFIA_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
+    components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.MAFIA_VOTE),
   });
 }
 
 async function handleDoctorProtect(ctx, gs, targetId) {
-  const { interaction } = ctx;
+  const { interaction, session } = ctx;
   const userId = interaction.user.id;
   const player = gs.players[userId];
 
-  if (!player || !player.alive || player.role !== ROLES.DOCTOR) return;
-  if (gs.phase !== PHASES.NIGHT_DOCTOR) return;
+  if (!player) {
+    return interaction.followUp({ content: MESSAGES.NOT_IN_GAME, ephemeral: true });
+  }
+  if (!player.alive) {
+    return interaction.followUp({ content: MESSAGES.DEAD_BLOCKED, ephemeral: true });
+  }
+  if (player.role !== ROLES.DOCTOR) {
+    return interaction.followUp({ content: MESSAGES.NOT_YOUR_TURN, ephemeral: true });
+  }
+  if (gs.phase !== PHASES.NIGHT_DOCTOR) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   // Validate target is alive and not the same as last round
   const target = gs.players[targetId];
-  if (!target || !target.alive) return;
-  if (targetId === gs.lastDoctorProtectedUserId) return;
+  if (!target || !target.alive) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
+  if (targetId === gs.lastDoctorProtectedUserId) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   gs.doctorProtectUserId = targetId;
+  const targets = getAlivePlayers(gs).filter(p => p.userId !== gs.lastDoctorProtectedUserId);
+  const pickMention = `<@${targetId}>`;
 
-  return interaction.followUp({
-    content: MESSAGES.PROTECT_CONFIRMED(`<@${targetId}>`),
-    ephemeral: true,
+  return interaction.editReply({
+    content: `${MESSAGES.DOCTOR_ACTION_TITLE}\n${MESSAGES.DOCTOR_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
+    components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DOCTOR_PROTECT),
   });
 }
 
 async function handleDetectiveCheck(ctx, gs, targetId) {
-  const { interaction } = ctx;
+  const { interaction, session } = ctx;
   const userId = interaction.user.id;
   const player = gs.players[userId];
 
-  if (!player || !player.alive || player.role !== ROLES.DETECTIVE) return;
-  if (gs.phase !== PHASES.NIGHT_DETECTIVE) return;
+  if (!player) {
+    return interaction.followUp({ content: MESSAGES.NOT_IN_GAME, ephemeral: true });
+  }
+  if (!player.alive) {
+    return interaction.followUp({ content: MESSAGES.DEAD_BLOCKED, ephemeral: true });
+  }
+  if (player.role !== ROLES.DETECTIVE) {
+    return interaction.followUp({ content: MESSAGES.NOT_YOUR_TURN, ephemeral: true });
+  }
+  if (gs.phase !== PHASES.NIGHT_DETECTIVE) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
+
+  const target = gs.players[targetId];
+  if (!target || !target.alive || targetId === userId) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   gs.detectiveInvestigateUserId = targetId;
-
-  // Show result immediately (ephemeral)
-  const target = gs.players[targetId];
   const roleName = ROLE_NAMES[target.role];
+  gs.detectiveLastResultText = `<@${targetId}> هو (${roleName})`;
 
-  return interaction.followUp({
-    content: `${MESSAGES.CHECK_CONFIRMED(`<@${targetId}>`)}\n${MESSAGES.CHECK_RESULT(`<@${targetId}>`, roleName)}`,
-    ephemeral: true,
+  const targets = getAlivePlayers(gs).filter(p => p.userId !== userId);
+  const pickMention = `<@${targetId}>`;
+
+  return interaction.editReply({
+    content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}\n${MESSAGES.DETECTIVE_LAST_RESULT(gs.detectiveLastResultText)}`,
+    components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DETECTIVE_CHECK),
   });
 }
 
@@ -718,8 +804,20 @@ async function handleDayVote(ctx, gs, targetId) {
   const userId = interaction.user.id;
   const player = gs.players[userId];
 
-  if (!player || !player.alive) return;
-  if (gs.phase !== PHASES.DAY_VOTE) return;
+  if (!player) {
+    return interaction.followUp({ content: MESSAGES.NOT_IN_GAME, ephemeral: true });
+  }
+  if (!player.alive) {
+    return interaction.followUp({ content: MESSAGES.DEAD_BLOCKED, ephemeral: true });
+  }
+  if (gs.phase !== PHASES.DAY_VOTE) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
+
+  const target = gs.players[targetId];
+  if (!target || !target.alive) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   gs.dayVotes.set(userId, targetId);
   scheduleVoteMessageUpdate(gs, session);
@@ -730,8 +828,15 @@ async function handleDayVoteSkip(ctx, gs) {
   const userId = interaction.user.id;
   const player = gs.players[userId];
 
-  if (!player || !player.alive) return;
-  if (gs.phase !== PHASES.DAY_VOTE) return;
+  if (!player) {
+    return interaction.followUp({ content: MESSAGES.NOT_IN_GAME, ephemeral: true });
+  }
+  if (!player.alive) {
+    return interaction.followUp({ content: MESSAGES.DEAD_BLOCKED, ephemeral: true });
+  }
+  if (gs.phase !== PHASES.DAY_VOTE) {
+    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+  }
 
   gs.dayVotes.set(userId, 'SKIP');
   scheduleVoteMessageUpdate(gs, session);
@@ -751,7 +856,8 @@ async function handleHintPurchase(ctx, gs) {
   if (gs.phase !== PHASES.DAY_VOTE) {
     return interaction.followUp({ content: MESSAGES.HINT_WRONG_PHASE, ephemeral: true });
   }
-  if (gs.hintPurchasesThisRound.has(userId)) {
+  const hintUses = gs.hintPurchasesThisRound.get(userId) || 0;
+  if (hintUses >= MAX_HINTS_PER_PLAYER_PER_ROUND) {
     return interaction.followUp({ content: MESSAGES.HINT_ALREADY_USED, ephemeral: true });
   }
 
@@ -776,7 +882,7 @@ async function handleHintPurchase(ctx, gs) {
     return interaction.followUp({ content: '❌ حدث خطأ غير متوقع', ephemeral: true });
   }
 
-  gs.hintPurchasesThisRound.add(userId);
+  gs.hintPurchasesThisRound.set(userId, hintUses + 1);
 
   // Generate hint: 1 random alive mafia + 1 random alive non-mafia
   const aliveMafia = Object.values(gs.players).filter(p => p.alive && p.role === ROLES.MAFIA);
@@ -823,8 +929,10 @@ function resolveMafiaVotes(gs) {
 }
 
 function resolveDayVotes(gs) {
+  const aliveTargetIds = new Set(getAlivePlayers(gs).map(p => p.userId));
   const counts = new Map();
   for (const target of gs.dayVotes.values()) {
+    if (target !== 'SKIP' && !aliveTargetIds.has(target)) continue;
     counts.set(target, (counts.get(target) || 0) + 1);
   }
 
@@ -848,8 +956,10 @@ function resolveDayVotes(gs) {
 }
 
 function computeVoteCounts(gs) {
+  const aliveTargetIds = new Set(getAlivePlayers(gs).map(p => p.userId));
   const counts = new Map();
   for (const target of gs.dayVotes.values()) {
+    if (target !== 'SKIP' && !aliveTargetIds.has(target)) continue;
     counts.set(target, (counts.get(target) || 0) + 1);
   }
   return counts;
@@ -936,6 +1046,7 @@ function assignRoles(sessionPlayers) {
     playerMap[p.userId] = {
       userId: p.userId,
       displayName: p.displayName || 'Unknown',
+      avatarURL: p.avatarURL || null,
       role: roles[idx],
       alive: true,
     };
@@ -968,15 +1079,63 @@ async function changePhase(gs, session, newPhase) {
   gs.phase = newPhase;
   session.phase = newPhase;
   session.uiVersion = (session.uiVersion || 0) + 1;
-  try {
-    await sessionManager.save(session);
-  } catch (error) {
-    logger.warn('[Mafia] Failed to persist phase change:', error.message);
-  }
+  await persistMafiaState(gs, session);
 }
 
 function getPhaseEndEpoch(durationMs) {
   return Math.floor((Date.now() + durationMs) / 1000);
+}
+
+function resolveCurrentPhaseWait(gs) {
+  const resolver = gs.currentPhaseResolve;
+  gs.currentPhaseResolve = null;
+  if (typeof resolver === 'function') {
+    resolver();
+  }
+}
+
+function buildPersistedPlayers(gs) {
+  return Object.fromEntries(
+    Object.values(gs.players).map((p) => [
+      p.userId,
+      {
+        userId: p.userId,
+        displayName: p.displayName,
+        avatarURL: p.avatarURL || null,
+        role: p.role,
+        alive: p.alive,
+      },
+    ])
+  );
+}
+
+function buildPersistedMafiaState(gs, session) {
+  return {
+    state: gs.state,
+    phase: gs.phase,
+    roundNumber: gs.roundNumber,
+    players: buildPersistedPlayers(gs),
+    detectiveEnabled: gs.detectiveEnabled,
+    mafiaKillTargetUserId: gs.resolvedMafiaTarget,
+    doctorProtectUserId: gs.resolvedDoctorProtect,
+    detectiveInvestigateUserId: gs.detectiveInvestigateUserId,
+    lastDoctorProtectedUserId: gs.lastDoctorProtectedUserId,
+    voteExpelledUserId: gs.lastVoteExpelledUserId,
+    voteOutcome: gs.lastVoteOutcome,
+    lobbyMessageId: session.messageId || null,
+    statusMessageId: gs.controlPanelMessageId || null,
+    voteMessageId: gs.voteMessageId || null,
+  };
+}
+
+async function persistMafiaState(gs, session) {
+  try {
+    session.gameState = session.gameState || {};
+    session.gameState.mafia = buildPersistedMafiaState(gs, session);
+    await sessionManager.save(session);
+  } catch (error) {
+    logger.warn('[Mafia] Failed to persist mafia game state:', error.message);
+  }
 }
 
 function getRunningPhaseEpoch(gs) {
@@ -1018,13 +1177,26 @@ function delay(ms, signal = null) {
       return;
     }
 
-    const timer = setTimeout(resolve, ms);
+    let timer = null;
+    const onAbort = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      reject(new Error('Delay aborted'));
+    };
+
+    timer = setTimeout(() => {
+      if (signal) {
+        signal.removeEventListener('abort', onAbort);
+      }
+      resolve();
+    }, ms);
 
     if (signal) {
-      const onAbort = () => {
-        clearTimeout(timer);
-        reject(new Error('Delay aborted'));
-      };
       signal.addEventListener('abort', onAbort, { once: true });
     }
   });
@@ -1037,19 +1209,9 @@ export async function cancelMafiaGame(sessionId, reason = 'CANCELLED') {
   if (!gs) return false;
 
   gs.state = 'ENDED';
-
-  try {
-    await SessionService.endSession(sessionId, null, reason);
-  } catch (error) {
-    logger.error('[Mafia] Failed to end session during cancellation:', error);
-  }
-
-  // Notify channel
-  try {
-    await gs.channel.send({ content: MESSAGES.GAME_CANCELLED });
-  } catch (error) {
-    logger.warn('[Mafia] Failed to send cancellation message:', error.message);
-  }
+  gs.phase = PHASES.ENDED;
+  gs.timeouts.clearAll();
+  resolveCurrentPhaseWait(gs);
 
   // Edit control panel
   try {
@@ -1072,6 +1234,7 @@ export async function cancelMafiaGame(sessionId, reason = 'CANCELLED') {
 function cleanupGame(sessionId) {
   const gs = activeGames.get(sessionId);
   if (gs) {
+    resolveCurrentPhaseWait(gs);
     gs.timeouts.clearAll();
     if (gs.abortController) {
       gs.abortController.abort();

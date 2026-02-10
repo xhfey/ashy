@@ -10,9 +10,17 @@ import {
   ButtonStyle,
 } from 'discord.js';
 import { codec } from '../../framework/index.js';
-import { ACTIONS, NIGHT_PHASES } from './mafia.constants.js';
+import { GAMES } from '../../config/games.config.js';
+import { ACTIONS, HINT_COST, NIGHT_PHASES } from './mafia.constants.js';
 
 const MAX_BUTTONS_PER_ROW = 5;
+const MAX_COMPONENT_ROWS = 5;
+const DAY_ACTION_ROWS = 1;
+const GAME_MAX_PLAYERS = GAMES.MAFIA?.maxPlayers ?? 15;
+const MAX_DAY_VOTE_TARGETS = Math.min(
+  GAME_MAX_PLAYERS,
+  (MAX_COMPONENT_ROWS - DAY_ACTION_ROWS) * MAX_BUTTONS_PER_ROW
+);
 
 // ==================== CONTROL PANEL ====================
 
@@ -98,8 +106,11 @@ export function buildNightTargetButtons(session, targets, selectedId, actionType
     rows.push(row);
   }
 
-  // Discord max 5 rows; night actions have no extra action row
-  return rows.slice(0, 5);
+  if (rows.length > MAX_COMPONENT_ROWS) {
+    throw new Error(`[Mafia] Too many night target rows (${rows.length}); Discord max is ${MAX_COMPONENT_ROWS}`);
+  }
+
+  return rows;
 }
 
 // ==================== DAY VOTE BUTTONS ====================
@@ -112,16 +123,20 @@ export function buildNightTargetButtons(session, targets, selectedId, actionType
  * @returns {ActionRowBuilder[]}
  */
 export function buildDayVoteButtons(session, alivePlayers, voteCounts) {
-  const rows = [];
-  let slotNum = 0;
+  if (alivePlayers.length > MAX_DAY_VOTE_TARGETS) {
+    throw new Error(
+      `[Mafia] Too many day vote targets (${alivePlayers.length}); max supported is ${MAX_DAY_VOTE_TARGETS}`
+    );
+  }
 
-  // Player vote buttons (up to 3 rows of 5 = 15 players max)
+  const rows = [];
+
+  // Player vote buttons
   for (let i = 0; i < alivePlayers.length; i += MAX_BUTTONS_PER_ROW) {
     const row = new ActionRowBuilder();
     const chunk = alivePlayers.slice(i, i + MAX_BUTTONS_PER_ROW);
 
     for (const player of chunk) {
-      slotNum++;
       const count = voteCounts.get(player.userId) || 0;
 
       row.addComponents(
@@ -144,15 +159,18 @@ export function buildDayVoteButtons(session, alivePlayers, voteCounts) {
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId(codec.forSession(session, ACTIONS.HINT))
-      .setLabel('تلميح (100)')
+      .setLabel(`تلميح (${HINT_COST})`)
       .setEmoji('🕵️')
       .setStyle(ButtonStyle.Success)
   );
 
   rows.push(actionRow);
 
-  // Discord max 5 rows
-  return rows.slice(0, 5);
+  if (rows.length > MAX_COMPONENT_ROWS) {
+    throw new Error(`[Mafia] Too many day vote rows (${rows.length}); Discord max is ${MAX_COMPONENT_ROWS}`);
+  }
+
+  return rows;
 }
 
 // ==================== HELPERS ====================

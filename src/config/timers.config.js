@@ -10,6 +10,7 @@
 export const LOBBY_COUNTDOWN = {
   DICE: 30,
   ROULETTE: 60,
+  MAFIA: 25,
   DEFAULT: 30,
 };
 

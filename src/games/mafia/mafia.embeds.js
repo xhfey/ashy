@@ -3,8 +3,7 @@
  * Minimal - most Mafia UI is content-based, not embed-based
  */
 
-import { EmbedBuilder } from 'discord.js';
-import { COLORS, ROLE_NAMES, ROLE_EMOJIS } from './mafia.constants.js';
+import { ROLE_NAMES, ROLE_EMOJIS } from './mafia.constants.js';
 
 /**
  * Build team distribution text (no image for v1)

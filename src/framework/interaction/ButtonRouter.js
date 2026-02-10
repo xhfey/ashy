@@ -3,33 +3,49 @@
  *
  * Handles:
  * - Always defer first (prevents "interaction failed")
- * - Acquire lock (prevents race conditions)
- * - Re-fetch session after lock (gets fresh state)
+ * - Per-game concurrency strategy:
+ *   - queue (for high-frequency games like Mafia voting)
+ *   - short lock + drop (default, preserves legacy behavior)
+ * - Re-fetch session when processing starts (gets fresh state)
  * - Stale click detection (via token/uiVersion)
  * - Route to game handler
- * - Release lock
  */
 
 import { codec } from './CustomIdCodec.js';
 import logger from '../../utils/logger.js';
 
-const lockMap = new Map(); // lockKey -> expiresAt(ms)
-const LOCK_TTL_MS = 2 * 1000;
+const sessionQueues = new Map(); // sessionId -> Promise
+const sessionLocks = new Map(); // sessionId -> expiresAt
+const LOCK_TTL_MS = 2000;
 
-function tryAcquireLock(lockKey, ttlMs = LOCK_TTL_MS) {
+function enqueueSessionTask(sessionId, task) {
+  const previous = sessionQueues.get(sessionId) || Promise.resolve();
+  const current = previous
+    .catch(() => {})
+    .then(task);
+
+  sessionQueues.set(sessionId, current);
+  current.finally(() => {
+    if (sessionQueues.get(sessionId) === current) {
+      sessionQueues.delete(sessionId);
+    }
+  });
+
+  return current;
+}
+
+function tryAcquireSessionLock(sessionId, ttlMs = LOCK_TTL_MS) {
   const now = Date.now();
-  const expiresAt = lockMap.get(lockKey);
-
+  const expiresAt = sessionLocks.get(sessionId);
   if (Number.isFinite(expiresAt) && expiresAt > now) {
     return false;
   }
-
-  lockMap.set(lockKey, now + ttlMs);
+  sessionLocks.set(sessionId, now + ttlMs);
   return true;
 }
 
-function releaseLock(lockKey) {
-  lockMap.delete(lockKey);
+function releaseSessionLock(sessionId) {
+  sessionLocks.delete(sessionId);
 }
 
 class ButtonRouter {
@@ -65,22 +81,34 @@ class ButtonRouter {
 
       const { sessionId, action, details, phase, token } = parsed;
 
-      // 3. Acquire lock
-      const lockKey = `game:lock:${sessionId}`;
-      const gotLock = tryAcquireLock(lockKey, LOCK_TTL_MS);
-
-      if (!gotLock) {
-        logger.debug(`[ButtonRouter] Lock contention on ${sessionId}`);
-        return true; // Someone else processing, handled
+      const initialSession = await this.sessions.load(sessionId);
+      if (!initialSession) {
+        logger.debug(`[ButtonRouter] Session ${sessionId} expired`);
+        try {
+          await interaction.followUp({
+            content: '⏰ انتهت هذه اللعبة. ابدأ لعبة جديدة بـ `/play`',
+            ephemeral: true
+          });
+        } catch (e) {
+          // Ignore if followUp fails
+        }
+        return true;
       }
 
-      try {
-        // 4. Re-fetch session AFTER acquiring lock
+      const initialHandler = this.games.get(initialSession.gameType);
+      if (!initialHandler) {
+        logger.error(`[ButtonRouter] Game ${initialSession.gameType} not registered`);
+        return true;
+      }
+
+      const useQueue = initialHandler.concurrency === 'queue';
+
+      const processInteraction = async () => {
+        // Re-fetch session when processing starts (fresh state)
         const session = await this.sessions.load(sessionId);
 
         if (!session) {
           logger.debug(`[ButtonRouter] Session ${sessionId} expired`);
-          // Optional: send ephemeral "game expired" message
           try {
             await interaction.followUp({
               content: '⏰ انتهت هذه اللعبة. ابدأ لعبة جديدة بـ `/play`',
@@ -89,10 +117,10 @@ class ButtonRouter {
           } catch (e) {
             // Ignore if followUp fails
           }
-          return true;
+          return;
         }
 
-        // 5. Stale click detection
+        // Stale click detection
         const currentPhase = session.phase || 'WAITING';
         const currentToken = session.uiVersion || 0;
 
@@ -100,17 +128,17 @@ class ButtonRouter {
           logger.debug(
             `[ButtonRouter] Stale click: expected ${currentPhase}:${currentToken}, got ${phase}:${token}`
           );
-          return true; // Silent ignore - old button
+          return; // Silent ignore - old button
         }
 
-        // 6. Touch TTL (keep session alive)
+        // Touch session for API compatibility
         await this.sessions.touch(sessionId);
 
-        // 7. Route to game handler
+        // Route to game handler
         const gameHandler = this.games.get(session.gameType);
         if (!gameHandler) {
           logger.error(`[ButtonRouter] Game ${session.gameType} not registered`);
-          return true;
+          return;
         }
 
         // Build context for game
@@ -124,10 +152,7 @@ class ButtonRouter {
           interaction,
           channel: interaction.channel,
 
-          /**
-           * Helper to save session and increment UI version
-           * Call this after making changes to session state
-           */
+          // Helper to save session and increment UI version.
           commit: async () => {
             session.uiVersion = (session.uiVersion || 0) + 1;
             await this.sessions.save(session);
@@ -136,10 +161,23 @@ class ButtonRouter {
 
         // Call the handler
         await gameHandler.onAction(ctx);
+      };
 
+      if (useQueue) {
+        await enqueueSessionTask(sessionId, processInteraction);
+        return true;
+      }
+
+      // Default behavior for existing games: short lock, drop contending clicks.
+      if (!tryAcquireSessionLock(sessionId)) {
+        logger.debug(`[ButtonRouter] Lock busy for ${sessionId}, dropping interaction`);
+        return true;
+      }
+
+      try {
+        await processInteraction();
       } finally {
-        // 8. Always release lock
-        releaseLock(lockKey);
+        releaseSessionLock(sessionId);
       }
 
       return true; // Handled
@@ -159,8 +197,13 @@ class ButtonRouter {
     if (!handler.onAction) {
       throw new Error(`Handler for ${gameType} must have onAction method`);
     }
-    this.games.set(gameType, handler);
-    logger.info(`[ButtonRouter] Registered handler for ${gameType}`);
+
+    const concurrency = handler.concurrency === 'queue' ? 'queue' : 'drop';
+    this.games.set(gameType, {
+      ...handler,
+      concurrency,
+    });
+    logger.info(`[ButtonRouter] Registered handler for ${gameType} (concurrency=${concurrency})`);
   }
 
   /**
