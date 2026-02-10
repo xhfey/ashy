@@ -28,6 +28,15 @@ import {
   getActiveGameByChannel as getRouletteActiveByChannel
 } from './roulette/roulette.game.js';
 import { prewarmWheelAssets } from './roulette/WheelGenerator.js';
+import {
+  registerMafiaHandler,
+  startMafiaGame,
+  cancelMafiaGame,
+  cancelMafiaGameByChannel,
+  getActiveGamesCount as getMafiaActiveCount,
+  getActiveGameByChannel as getMafiaActiveByChannel
+} from './mafia/mafia.game.js';
+import { prewarmMafiaAssets } from './mafia/mafia.images.js';
 
 function createNotImplementedModule(gameId) {
   const cfg = GAMES[gameId];
@@ -92,7 +101,23 @@ const modules = [
   createNotImplementedModule('RPS'),
   createNotImplementedModule('XO'),
   createNotImplementedModule('CHAIRS'),
-  createNotImplementedModule('MAFIA'),
+  {
+    id: 'MAFIA',
+    publicEnabled: publicGameSet.has('MAFIA'),
+    implemented: true,
+    minPlayers: GAMES.MAFIA.minPlayers,
+    maxPlayers: GAMES.MAFIA.maxPlayers,
+    lobbyType: GAMES.MAFIA.lobbyType,
+    commandName: GAMES.MAFIA.command,
+    label: `${GAMES.MAFIA.emoji} ${GAMES.MAFIA.name}`,
+    registerHandlers: registerMafiaHandler,
+    start: startMafiaGame,
+    stop: cancelMafiaGame,
+    stopByChannel: cancelMafiaGameByChannel,
+    findByChannel: getMafiaActiveByChannel,
+    getActiveCount: getMafiaActiveCount,
+    prewarm: prewarmMafiaAssets,
+  },
   createNotImplementedModule('HIDESEEK'),
   createNotImplementedModule('REPLICA'),
   createNotImplementedModule('GUESS_COUNTRY'),

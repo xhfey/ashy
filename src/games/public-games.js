@@ -5,7 +5,7 @@ import { isGameEnabledForGuild } from '../config/feature-flags.config.js';
  * Lightweight public game metadata used by command registration.
  * Keep this file free of runtime game imports (canvas-heavy modules).
  */
-const PUBLIC_GAME_IDS = ['DICE', 'ROULETTE'];
+const PUBLIC_GAME_IDS = ['DICE', 'ROULETTE', 'MAFIA'];
 const PUBLIC_GAME_ID_SET = new Set(PUBLIC_GAME_IDS);
 
 export function getPublicGameIds() {

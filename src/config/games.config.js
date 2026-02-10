@@ -93,7 +93,7 @@ export const GAMES = {
     maxPlayers: 15,
     lobbyType: 'SIMPLE',
     baseReward: 15,
-    countdownSeconds: 30
+    countdownSeconds: 25
   },
   HIDESEEK: {
     id: 'HIDESEEK',

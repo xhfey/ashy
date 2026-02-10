@@ -55,7 +55,8 @@ export const PERKS = {
       name: 'تلميح',
       emoji: '🕵️',
       price: 100,
-      description: 'احصل على تلميح لمعرفة المافيا'
+      description: 'احصل على تلميح لمعرفة المافيا',
+      showInShop: false
     }
   },
 
