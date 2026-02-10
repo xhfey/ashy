@@ -167,19 +167,3 @@ export const MESSAGES = {
   JOIN_TO_PLAY: 'انضم للعبة أولاً',
 };
 
-// ==================== WHEEL COLORS ====================
-
-export const WHEEL_COLORS = [
-  '#C98350', // Brass/Bronze
-  '#8B2942', // Deep Crimson
-  '#D86075', // Hot Pink
-  '#413A86', // Royal Violet
-  '#BC495C', // Rose
-  '#2D4A3E', // Dark Forest
-  '#D48D56', // Ember Orange
-  '#4A3B6B', // Deep Purple
-  '#8B4513', // Saddle Brown
-  '#6B3A5B', // Plum
-  '#3D5C5C', // Teal
-  '#7B3F3F', // Burgundy
-];

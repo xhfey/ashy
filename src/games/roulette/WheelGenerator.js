@@ -1,29 +1,19 @@
 /**
- * Roulette Wheel Generator - Premium Edition
- * Generates an animated GIF of the spinning wheel with AAA-quality optimizations.
+ * Roulette Wheel Generator
+ * Generates an animated GIF of the spinning wheel.
  *
- * OPTIMIZATIONS APPLIED:
- * 1. Pre-rendered static layers (OffscreenCanvas) - 50%+ performance boost
- * 2. Physics-based easing with realistic friction
- * 3. Motion blur for smooth 20fps appearance
- * 4. Upside-down text correction for premium UX
- * 5. Text stroke + dynamic sizing for perfect readability
- * 6. Winner highlight/celebration effects
- * 7. Gradient depth on segments for 3D look
- * 8. Anticipation animation (wind-back before stop)
- * 9. Segment ticking effect during slowdown
- * 10. Smart color contrast system
- * 11. Variable frame delays for optimization
- * 12. Pre-calculated math (no per-frame calculations)
- * 13. High-quality image smoothing
- * 14. Final hold frames for better loop experience
+ * All visual settings are configurable via src/config/wheel.config.js.
+ * To customize: edit that file (colors, images, animation, text).
  *
- * BUGS FIXED:
- * - #21: speed variable undefined (now calculated properly)
- * - Fractional spin offset calculation
- * - Motion blur consistency (degrees per second)
- * - Asset cache race conditions
- * - Visual jump before celebration
+ * Visual features:
+ * - 2x supersampled rendering (anti-aliased edges)
+ * - Compound physics easing (accelerate → constant → friction decay)
+ * - 4-layer motion blur trail
+ * - 3-stop radial gradients on segments (3D depth)
+ * - Text drop shadows
+ * - Fade-in winner celebration with pulse
+ * - Pre-rendered static layers for performance
+ * - Pre-calculated segment math (no per-frame recalculation)
  */
 
 import { createCanvas, loadImage, registerFont } from 'canvas';
@@ -32,13 +22,27 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import logger from '../../utils/logger.js';
+import { WHEEL_CONFIG as cfg } from '../../config/wheel.config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT = path.join(__dirname, '..', '..', '..');
+
+// ==================== DERIVED CONSTANTS ====================
+
+const S = cfg.canvas.supersample;
+const OUTPUT_SIZE = cfg.canvas.size;
+const RENDER_SIZE = OUTPUT_SIZE * S;
+const RENDER_CENTER = RENDER_SIZE / 2;
+
+// Scaled wheel geometry (for supersampled rendering)
+const OUTER_R = cfg.wheel.outerRadius * S;
+const INNER_R = cfg.wheel.innerRadius * S;
+const TEXT_R = cfg.wheel.textRadius * S;
 
 // ==================== FONT REGISTRATION ====================
 
 try {
-  const fontPath = path.join(__dirname, '../../../assets/fonts');
+  const fontPath = path.join(PROJECT_ROOT, 'assets', 'fonts');
   if (fs.existsSync(path.join(fontPath, 'Cairo-Bold.ttf'))) {
     registerFont(path.join(fontPath, 'Cairo-Bold.ttf'), { family: 'Cairo', weight: '700' });
   }
@@ -49,93 +53,29 @@ try {
   logger.warn(`[WheelGenerator] Font registration failed: ${e.message}`);
 }
 
-// ==================== CONSTANTS ====================
-
-// Keep dimensions moderate for faster generation and smaller Discord upload size.
-const SCALE = 1;
-
-const CANVAS = {
-  width: 550 * SCALE,
-  height: 550 * SCALE,
-  centerX: 275 * SCALE,
-  centerY: 275 * SCALE,
-  targetWidth: 550,
-  targetHeight: 550,
-};
-
-const WHEEL = {
-  outerRadius: 235 * SCALE,
-  innerRadius: 60 * SCALE,
-  textRadius: 165 * SCALE,
-};
-
-const POINTER = {
-  x: 440,
-  y: 255,
-  width: 60,
-  height: 40,
-};
-
-const CENTER_EMBLEM = {
-  x: 205,
-  y: 205,
-  width: 140,
-  height: 140,
-};
-
-const SEGMENT_COLORS = [
-  '#C98350', '#8B2942', '#D86075', '#413A86',
-  '#BC495C', '#2D4A3E', '#D48D56', '#4A3B6B',
-  '#8B4513', '#6B3A5B', '#3D5C5C', '#7B3F3F'
-];
-
-const COLORS = {
-  text: '#ECECED',
-  textStroke: '#000000',
-  border: '#1A1A1A',
-  winnerGlow: '#FFD700',
-};
-
-// Physics-based animation settings
-const ANIMATION = {
-  baseFps: 14,
-  totalSpins: 3.5, // Number of full rotations
-  duration: 1.6, // seconds of spinning
-  anticipationFrames: 3, // Wind-back frames
-  celebrationFrames: 8, // brief hold on winner
-  motionBlurStrength: 0.15, // Motion blur alpha
-  motionBlurOffset: 2, // Motion blur angle offset
-  // Tick effect threshold - when speed drops below this (deg/sec), apply ticking
-  tickSpeedThreshold: 300,
-};
-
 // ==================== ASSET CACHE ====================
 
-// Cache promises (not results) to prevent race conditions and log spam
 const imageCache = new Map();
 
-function loadAsset(filename) {
-  if (imageCache.has(filename)) return imageCache.get(filename);
+function loadAsset(assetRelativePath) {
+  if (imageCache.has(assetRelativePath)) return imageCache.get(assetRelativePath);
 
   const promise = (async () => {
     try {
-      const assetPath = path.join(__dirname, '../../../assets/images/roulette-wheel', filename);
-      return await loadImage(assetPath);
+      const fullPath = path.join(PROJECT_ROOT, assetRelativePath);
+      return await loadImage(fullPath);
     } catch (e) {
-      logger.warn(`[WheelGenerator] Asset not found ${filename}, using fallback`);
-      return null; // Cache null to prevent repeated load attempts
+      logger.warn(`[WheelGenerator] Asset not found: ${assetRelativePath}, using fallback`);
+      return null;
     }
   })();
 
-  imageCache.set(filename, promise);
+  imageCache.set(assetRelativePath, promise);
   return promise;
 }
 
 // ==================== UTILITY FUNCTIONS ====================
 
-/**
- * Get luminance of a color to determine if text should be light or dark
- */
 function getLuminance(hexColor) {
   const rgb = hexColor.match(/[A-Za-z0-9]{2}/g).map(v => parseInt(v, 16));
   const [r, g, b] = rgb.map(v => {
@@ -145,82 +85,92 @@ function getLuminance(hexColor) {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
-/**
- * Get optimal text color based on segment background
- */
 function getTextColor(segmentColor) {
   const luminance = getLuminance(segmentColor);
-  return luminance > 0.5 ? '#1A1A1A' : '#ECECED';
+  return luminance > cfg.text.luminanceThreshold ? cfg.text.darkTextColor : cfg.text.color;
 }
 
-/**
- * Physics-based easing with friction simulation
- * Realistic wheel deceleration
- */
-function easeOutFriction(t) {
-  // Exponential decay with momentum
-  return 1 - Math.pow(1 - t, 3);
+function shadeColor(color, percent) {
+  const num = parseInt(color.replace('#', ''), 16);
+  const amt = Math.round(2.55 * percent);
+  const R = Math.max(0, Math.min(255, (num >> 16) + amt));
+  const G = Math.max(0, Math.min(255, (num >> 8 & 0x00FF) + amt));
+  const B = Math.max(0, Math.min(255, (num & 0x0000FF) + amt));
+  return `#${(0x1000000 + R * 0x10000 + G * 0x100 + B).toString(16).slice(1)}`;
 }
 
-/**
- * Smooth anticipation ease (monotonic 0..1)
- */
-function easeOutCubic(t) {
-  return 1 - Math.pow(1 - t, 3);
-}
-
-/**
- * Smart text truncation with ellipsis
- */
-function truncateText(text, maxLength = 12) {
+function truncateText(text, maxLength = cfg.text.maxLength) {
   if (text.length <= maxLength) return text;
   return text.substring(0, maxLength - 1) + '…';
 }
 
-/**
- * Normalize angle to 0-360 range
- */
 function normalizeAngle(angle) {
   angle = angle % 360;
   return angle < 0 ? angle + 360 : angle;
 }
 
+// ==================== EASING ====================
+
+function easeOutCubic(t) {
+  return 1 - Math.pow(1 - t, 3);
+}
+
 /**
- * Frame delay for spin phase (matches generator timing)
+ * Compound 3-phase easing:
+ * Phase 1 (0 → rampEnd): Quadratic acceleration
+ * Phase 2 (rampEnd → decayStart): Constant velocity
+ * Phase 3 (decayStart → 1.0): Exponential friction decay
  */
+function compoundEase(t) {
+  const { rampEnd, decayStart, decayExponent } = cfg.easing;
+
+  // Phase 1: Acceleration (quadratic ease-in)
+  if (t <= rampEnd) {
+    const lt = t / rampEnd;
+    return lt * lt * rampEnd * 0.5;
+  }
+
+  const accelDist = rampEnd * 0.5;
+
+  // Phase 2: Constant speed (linear)
+  if (t <= decayStart) {
+    const lt = (t - rampEnd) / (decayStart - rampEnd);
+    return accelDist + lt * (decayStart - rampEnd);
+  }
+
+  const constDist = decayStart - rampEnd;
+  const decayDist = 1.0 - accelDist - constDist;
+
+  // Phase 3: Heavy friction decay
+  const lt = (t - decayStart) / (1.0 - decayStart);
+  return accelDist + constDist + decayDist * (1 - Math.pow(1 - lt, decayExponent));
+}
+
+// ==================== FRAME DELAY ====================
+
 function getSpinFrameDelay(t) {
-  if (t < 0.3) return 35;
-  if (t < 0.7) return 45;
-  return 55;
+  for (const bracket of cfg.animation.spinDelays) {
+    if (t <= bracket.upTo) return bracket.delay;
+  }
+  return cfg.animation.spinDelays[cfg.animation.spinDelays.length - 1].delay;
 }
 
 // ==================== PRE-CALCULATION ====================
 
-/**
- * Pre-calculate all segment data to avoid per-frame calculations
- */
 function getSegmentColorIndex(i, numSegments) {
-  const colorCount = SEGMENT_COLORS.length;
-
-  if (numSegments <= colorCount) {
-    return i % colorCount;
-  }
-
-  // Offset each palette cycle to avoid adjacent duplicates when wrapping
+  const colorCount = cfg.segmentColors.length;
+  if (numSegments <= colorCount) return i % colorCount;
   const cycle = Math.floor(i / colorCount);
   const offset = cycle % colorCount;
   return (i + offset) % colorCount;
 }
 
-/**
- * Pre-calculate all segment data to avoid per-frame calculations
- */
 function preCalculateSegments(players) {
   const numSegments = players.length;
   const segmentAngle = (2 * Math.PI) / numSegments;
+  const sizes = cfg.text.sizes;
 
   return players.map((rawPlayer, i) => {
-    // Guard against non-object player entries (strings, nulls, etc.)
     const player = (rawPlayer && typeof rawPlayer === 'object')
       ? rawPlayer
       : { name: String(rawPlayer ?? 'Unknown') };
@@ -229,17 +179,16 @@ function preCalculateSegments(players) {
     const endAngle = (i + 1) * segmentAngle;
     const midAngle = startAngle + segmentAngle / 2;
     const colorIndex = getSegmentColorIndex(i, numSegments);
-    const color = SEGMENT_COLORS[colorIndex];
+    const color = cfg.segmentColors[colorIndex];
 
-    // Smart font sizing based on name length and player count
     const displayName = truncateText(player.displayName || player.name || 'Unknown');
     const nameLength = displayName.length;
     let fontSize;
-    if (numSegments > 12) fontSize = 11 * SCALE;
-    else if (nameLength > 12) fontSize = 12 * SCALE;
-    else if (nameLength > 8) fontSize = 14 * SCALE;
-    else if (numSegments > 8) fontSize = 14 * SCALE;
-    else fontSize = 16 * SCALE;
+    if (numSegments > 12) fontSize = sizes.tiny;
+    else if (nameLength > 12) fontSize = sizes.small;
+    else if (nameLength > 8) fontSize = sizes.medium;
+    else if (numSegments > 8) fontSize = sizes.medium;
+    else fontSize = sizes.large;
 
     return {
       player,
@@ -248,7 +197,7 @@ function preCalculateSegments(players) {
       midAngle,
       color,
       textAngle: midAngle,
-      fontSize,
+      fontSize: fontSize * S,
       textColor: getTextColor(color),
       displayName,
     };
@@ -257,72 +206,66 @@ function preCalculateSegments(players) {
 
 // ==================== STATIC LAYER RENDERING ====================
 
-/**
- * Pre-render all static layers once for massive performance boost
- */
 async function createStaticLayers() {
   const [bgImg, frameImg, centerImg, pointerImg] = await Promise.all([
-    loadAsset('roulette-wheel-bg.png'),
-    loadAsset('roulette-wheel-frame.png'),
-    loadAsset('roulette-wheel-center.png'),
-    loadAsset('roulette-wheel-pointer.png')
+    loadAsset(cfg.assets.background),
+    loadAsset(cfg.assets.frame),
+    loadAsset(cfg.assets.center),
+    loadAsset(cfg.assets.pointer),
   ]);
 
-  // Base layer (solid fill to avoid GIF transparency artifacts)
-  const baseCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
+  // Base layer (solid fill)
+  const baseCanvas = createCanvas(OUTPUT_SIZE, OUTPUT_SIZE);
   const baseCtx = baseCanvas.getContext('2d', { alpha: false });
+  baseCtx.fillStyle = cfg.canvas.backgroundColor;
+  baseCtx.fillRect(0, 0, OUTPUT_SIZE, OUTPUT_SIZE);
 
-  // Pre-fill with background color (prevents transparent PNG pixels turning black)
-  baseCtx.fillStyle = '#1a1a2e';
-  baseCtx.fillRect(0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
-
-  // Create overlay layer (background art + frame + center + pointer)
-  const overlayCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
+  // Overlay layer (background art + frame + center + pointer)
+  const overlayCanvas = createCanvas(OUTPUT_SIZE, OUTPUT_SIZE);
   const overlayCtx = overlayCanvas.getContext('2d', { alpha: true });
 
-  // Background art (transparent hole lets the wheel show underneath)
+  // Background art
   if (bgImg) {
-    overlayCtx.drawImage(bgImg, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+    overlayCtx.drawImage(bgImg, 0, 0, OUTPUT_SIZE, OUTPUT_SIZE);
   }
 
-  // Frame (fallback: draw a circular border)
+  // Frame
   if (frameImg) {
-    overlayCtx.drawImage(frameImg, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+    overlayCtx.drawImage(frameImg, 0, 0, OUTPUT_SIZE, OUTPUT_SIZE);
   } else {
-    // Fallback: draw a simple golden frame border
-    overlayCtx.strokeStyle = '#FFD700';
-    overlayCtx.lineWidth = 8;
+    overlayCtx.strokeStyle = cfg.fallback.frameStroke;
+    overlayCtx.lineWidth = cfg.fallback.frameLineWidth;
     overlayCtx.beginPath();
-    overlayCtx.arc(CANVAS.targetWidth / 2, CANVAS.targetHeight / 2, 220, 0, Math.PI * 2);
+    overlayCtx.arc(OUTPUT_SIZE / 2, OUTPUT_SIZE / 2, 220, 0, Math.PI * 2);
     overlayCtx.stroke();
   }
 
-  // Center emblem (fallback: draw a center circle)
+  // Center emblem
   if (centerImg) {
-    overlayCtx.drawImage(centerImg, CENTER_EMBLEM.x, CENTER_EMBLEM.y, CENTER_EMBLEM.width, CENTER_EMBLEM.height);
+    const ce = cfg.centerEmblem;
+    overlayCtx.drawImage(centerImg, ce.x, ce.y, ce.width, ce.height);
   } else {
-    // Fallback: draw a simple center circle
-    overlayCtx.fillStyle = '#2a2a4a';
-    overlayCtx.strokeStyle = '#FFD700';
-    overlayCtx.lineWidth = 3;
+    overlayCtx.fillStyle = cfg.fallback.centerFill;
+    overlayCtx.strokeStyle = cfg.fallback.centerStroke;
+    overlayCtx.lineWidth = cfg.fallback.centerLineWidth;
     overlayCtx.beginPath();
-    overlayCtx.arc(CANVAS.targetWidth / 2, CANVAS.targetHeight / 2, 50, 0, Math.PI * 2);
+    overlayCtx.arc(OUTPUT_SIZE / 2, OUTPUT_SIZE / 2, cfg.fallback.centerRadius, 0, Math.PI * 2);
     overlayCtx.fill();
     overlayCtx.stroke();
   }
 
-  // Pointer (fallback: draw a triangle arrow)
+  // Pointer
   if (pointerImg) {
-    overlayCtx.drawImage(pointerImg, POINTER.x, POINTER.y, POINTER.width, POINTER.height);
+    const p = cfg.pointer;
+    overlayCtx.drawImage(pointerImg, p.x, p.y, p.width, p.height);
   } else {
-    // Fallback: draw a simple triangle pointer on the right side
-    overlayCtx.fillStyle = '#FFD700';
-    overlayCtx.strokeStyle = '#000000';
-    overlayCtx.lineWidth = 2;
+    overlayCtx.fillStyle = cfg.fallback.pointerFill;
+    overlayCtx.strokeStyle = cfg.fallback.pointerStroke;
+    overlayCtx.lineWidth = cfg.fallback.pointerLineWidth;
     overlayCtx.beginPath();
-    overlayCtx.moveTo(CANVAS.targetWidth - 30, CANVAS.targetHeight / 2);
-    overlayCtx.lineTo(CANVAS.targetWidth - 5, CANVAS.targetHeight / 2 - 20);
-    overlayCtx.lineTo(CANVAS.targetWidth - 5, CANVAS.targetHeight / 2 + 20);
+    overlayCtx.moveTo(OUTPUT_SIZE - 30, OUTPUT_SIZE / 2);
+    overlayCtx.lineTo(OUTPUT_SIZE - 5, OUTPUT_SIZE / 2 - 20);
+    overlayCtx.lineTo(OUTPUT_SIZE - 5, OUTPUT_SIZE / 2 + 20);
     overlayCtx.closePath();
     overlayCtx.fill();
     overlayCtx.stroke();
@@ -334,70 +277,89 @@ async function createStaticLayers() {
 // ==================== WHEEL SEGMENT DRAWING ====================
 
 /**
- * Draw wheel segments with gradients and depth
+ * Draw wheel segments at supersampled resolution.
+ * @param {number} glowIntensity - Winner glow intensity 0..1 (0 = off)
  */
-function drawWheelSegments(ctx, segments, rotationAngle, highlightWinner = false, winnerIndex = -1) {
+function drawWheelSegments(ctx, segments, rotationAngle, winnerIndex = -1, glowIntensity = 0) {
+  const seg = cfg.segment;
+  const grad = seg.gradient;
+  const txt = cfg.text;
+  const win = cfg.winner;
+
   ctx.save();
-  ctx.translate(CANVAS.centerX, CANVAS.centerY);
+  ctx.translate(RENDER_CENTER, RENDER_CENTER);
   ctx.rotate(rotationAngle * Math.PI / 180);
 
   segments.forEach((segment, i) => {
     const { startAngle, endAngle, color, textAngle, fontSize, textColor, displayName } = segment;
 
-    // Calculate needsFlip dynamically based on CURRENT angle (initial + rotation)
+    // Dynamic text flip based on current rotation
     const currentAngleDeg = normalizeAngle((textAngle * 180 / Math.PI) + rotationAngle);
     const needsFlip = currentAngleDeg > 90 && currentAngleDeg < 270;
 
-    // Draw segment with gradient for depth
+    // Draw segment
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.arc(0, 0, WHEEL.outerRadius, startAngle, endAngle);
+    ctx.arc(0, 0, OUTER_R, startAngle, endAngle);
     ctx.closePath();
 
-    // Create radial gradient for 3D effect
-    const gradient = ctx.createRadialGradient(0, 0, WHEEL.innerRadius, 0, 0, WHEEL.outerRadius);
-    gradient.addColorStop(0, color);
-    gradient.addColorStop(1, shadeColor(color, -20)); // Darker at edges
+    // 3-stop radial gradient for 3D depth
+    const gradient = ctx.createRadialGradient(0, 0, INNER_R, 0, 0, OUTER_R);
+    gradient.addColorStop(0, shadeColor(color, grad.innerBrighten));
+    gradient.addColorStop(grad.highlightStop, color);
+    gradient.addColorStop(1, shadeColor(color, grad.outerDarken));
 
     ctx.fillStyle = gradient;
     ctx.fill();
 
     // Segment border
-    ctx.lineWidth = 2 * SCALE;
-    ctx.strokeStyle = COLORS.border;
+    ctx.lineWidth = seg.borderWidth * S;
+    ctx.strokeStyle = seg.borderColor;
     ctx.stroke();
 
-    // Winner highlight (pulsing glow)
-    if (highlightWinner && i === winnerIndex) {
-      ctx.shadowColor = COLORS.winnerGlow;
-      ctx.shadowBlur = 30 * SCALE;
-      ctx.lineWidth = 4 * SCALE;
-      ctx.strokeStyle = COLORS.winnerGlow;
+    // Winner glow (fade-in + pulse)
+    if (glowIntensity > 0 && i === winnerIndex) {
+      ctx.save();
+      ctx.shadowColor = win.glowColor;
+      ctx.shadowBlur = win.glowMaxBlur * S * glowIntensity;
+      ctx.lineWidth = win.glowLineWidth * S * glowIntensity;
+      ctx.strokeStyle = win.glowColor;
+      ctx.globalAlpha = glowIntensity;
       ctx.stroke();
-      ctx.shadowColor = 'transparent';
-      ctx.shadowBlur = 0;
+      ctx.restore();
     }
 
-    // Draw text with stroke
+    // Draw text
     ctx.save();
     ctx.rotate(textAngle);
-    ctx.translate(WHEEL.textRadius, 0);
+    ctx.translate(TEXT_R, 0);
 
-    // Flip text if on left side
     if (needsFlip) {
       ctx.rotate(Math.PI);
     }
 
-    ctx.font = `bold ${fontSize}px "Cairo", "Arial", sans-serif`;
+    ctx.font = `bold ${fontSize}px "${txt.fontFamily}", "Arial", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
 
-    // Text stroke for readability
-    ctx.lineWidth = 3 * SCALE;
-    ctx.strokeStyle = COLORS.textStroke;
+    // Text drop shadow
+    ctx.shadowColor = txt.shadow.color;
+    ctx.shadowBlur = txt.shadow.blur * S;
+    ctx.shadowOffsetX = txt.shadow.offsetX * S;
+    ctx.shadowOffsetY = txt.shadow.offsetY * S;
+
+    // Text stroke
+    ctx.lineWidth = txt.strokeWidth * S;
+    ctx.strokeStyle = txt.strokeColor;
     ctx.lineJoin = 'round';
     ctx.miterLimit = 2;
     ctx.strokeText(displayName, 0, 0);
+
+    // Clear shadow for fill (prevent double shadow)
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
 
     // Text fill
     ctx.fillStyle = textColor;
@@ -409,43 +371,30 @@ function drawWheelSegments(ctx, segments, rotationAngle, highlightWinner = false
   ctx.restore();
 }
 
-/**
- * Shade a color (make it lighter or darker)
- */
-function shadeColor(color, percent) {
-  const num = parseInt(color.replace('#', ''), 16);
-  const amt = Math.round(2.55 * percent);
-  const R = Math.max(0, Math.min(255, (num >> 16) + amt));
-  const G = Math.max(0, Math.min(255, (num >> 8 & 0x00FF) + amt));
-  const B = Math.max(0, Math.min(255, (num & 0x0000FF) + amt));
-  return `#${(0x1000000 + R * 0x10000 + G * 0x100 + B).toString(16).slice(1)}`;
-}
-
 // ==================== MOTION BLUR ====================
 
-/**
- * Draw wheel with motion blur for smooth appearance
- * @param {number} speedDegPerSec - Angular velocity in degrees per second
- */
 function drawWheelWithBlur(wheelCtx, segments, angle, speedDegPerSec) {
-  wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
+  const mb = cfg.motionBlur;
+  wheelCtx.clearRect(0, 0, RENDER_SIZE, RENDER_SIZE);
 
-  // Calculate blur based on speed (degrees per second)
-  // Blur starts at ~100 deg/sec, maxes out at ~500 deg/sec
-  const blurAmount = Math.min(speedDegPerSec / 500, 1);
+  // Scale blur with velocity
+  const blurAmount = Math.min(
+    Math.max((speedDegPerSec - mb.speedThreshold) / (mb.speedCap - mb.speedThreshold), 0),
+    1,
+  );
 
-  if (blurAmount > 0.1) {
-    // Draw blurred trails
-    const blurOffset = ANIMATION.motionBlurOffset * blurAmount;
+  if (blurAmount > 0.05) {
+    // Draw ghost trail layers (furthest first)
+    for (let layer = mb.layers; layer >= 1; layer--) {
+      const layerOffset = (layer / mb.layers) * mb.maxOffset * blurAmount;
+      const layerAlpha = mb.baseAlpha * Math.pow(mb.alphaFalloff, layer - 1) * blurAmount;
 
-    wheelCtx.globalAlpha = ANIMATION.motionBlurStrength;
-    drawWheelSegments(wheelCtx, segments, angle - blurOffset);
-
-    wheelCtx.globalAlpha = ANIMATION.motionBlurStrength * 0.7;
-    drawWheelSegments(wheelCtx, segments, angle - blurOffset * 2);
+      wheelCtx.globalAlpha = layerAlpha;
+      drawWheelSegments(wheelCtx, segments, angle - layerOffset);
+    }
   }
 
-  // Draw main wheel
+  // Main wheel (full opacity)
   wheelCtx.globalAlpha = 1;
   drawWheelSegments(wheelCtx, segments, angle);
 }
@@ -453,13 +402,12 @@ function drawWheelWithBlur(wheelCtx, segments, angle, speedDegPerSec) {
 // ==================== CORE GIF GENERATOR ====================
 
 /**
- * Generate Premium Roulette Wheel GIF
- * @param {Array<{name: string, displayName?: string}>} players - List of players
- * @param {number} winnerIndex - Index of the winner in the players array
- * @returns {Promise<Buffer>} - GIF Buffer
+ * Generate Roulette Wheel GIF
+ * @param {Array<{name: string, displayName?: string}>} players
+ * @param {number} winnerIndex - Index of the winner
+ * @returns {Promise<Buffer>} GIF buffer
  */
 export async function generateWheelGif(players, winnerIndex) {
-  // Input validation
   if (!Array.isArray(players) || players.length === 0) {
     throw new Error('[WheelGenerator] players must be a non-empty array');
   }
@@ -467,160 +415,137 @@ export async function generateWheelGif(players, winnerIndex) {
     throw new Error(`[WheelGenerator] winnerIndex must be between 0 and ${players.length - 1}, got: ${winnerIndex}`);
   }
 
-  // Pre-calculate all segment data
+  const anim = cfg.animation;
   const segments = preCalculateSegments(players);
-
-  // Pre-render static layers
   const { baseCanvas, overlayCanvas } = await createStaticLayers();
 
-  // Setup encoder
-  const encoder = new GIFEncoder(CANVAS.targetWidth, CANVAS.targetHeight);
+  // GIF encoder at output resolution
+  const encoder = new GIFEncoder(OUTPUT_SIZE, OUTPUT_SIZE);
   encoder.start();
-  encoder.setRepeat(-1); // -1 = no repeat (play once)
-  encoder.setQuality(10); // Smaller file size while preserving clarity
-  // Note: Removed setTransparent(0x00000000) - it was making black strokes/borders transparent
+  encoder.setRepeat(cfg.encoder.repeat);
+  encoder.setQuality(cfg.encoder.quality);
 
-  // High-res wheel canvas (2x supersampled)
-  const wheelCanvas = createCanvas(CANVAS.width, CANVAS.height);
+  // Supersampled wheel canvas
+  const wheelCanvas = createCanvas(RENDER_SIZE, RENDER_SIZE);
   const wheelCtx = wheelCanvas.getContext('2d', { alpha: true });
 
-  // Final compositing canvas
-  const finalCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
+  // Final compositing canvas (output resolution)
+  const finalCanvas = createCanvas(OUTPUT_SIZE, OUTPUT_SIZE);
   const finalCtx = finalCanvas.getContext('2d', { alpha: false });
-
-  // Enable high-quality smoothing
   finalCtx.imageSmoothingEnabled = true;
   finalCtx.imageSmoothingQuality = 'high';
 
-  // Animation calculations
+  // Animation math
   const numSegments = players.length;
   const segmentAngle = 360 / numSegments;
   const winnerCenterAngle = (winnerIndex + 0.5) * segmentAngle;
 
-  // Pointer is on the right side (canvas 0° = 3 o'clock position)
-  const pointerAngle = 0;
-
-  // Account for fractional spins (e.g., 3.5 spins adds 180° offset)
-  const spins = ANIMATION.totalSpins;
+  const spins = anim.totalSpins;
   const fractionalOffset = (spins - Math.floor(spins)) * 360;
-
-  // Calculate final angle: where the wheel should stop so winner aligns with pointer
-  const finalAngle = normalizeAngle(pointerAngle - winnerCenterAngle - fractionalOffset);
-
-  // Total spin distance (full rotations + final position)
+  const finalAngle = normalizeAngle(-winnerCenterAngle - fractionalOffset);
   const totalSpin = spins * 360 + finalAngle;
 
-  // Calculate frame timing
-  const totalSpinFrames = Math.floor(ANIMATION.duration * ANIMATION.baseFps);
-
-  const windBackDegrees = ANIMATION.anticipationFrames > 0 ? -15 : 0;
+  const totalSpinFrames = Math.floor(anim.durationSec * anim.fps);
+  const windBackDegrees = anim.anticipation.frames > 0 ? anim.anticipation.degrees : 0;
   const spinStartAngle = windBackDegrees;
   const spinDistance = totalSpin - spinStartAngle;
 
-  let currentAngle = spinStartAngle;
   let previousAngle = spinStartAngle;
   let lastSegmentIndex = -1;
 
+  // Helper: composite one frame
+  function compositeFrame() {
+    finalCtx.drawImage(baseCanvas, 0, 0);
+    finalCtx.drawImage(wheelCanvas, 0, 0, OUTPUT_SIZE, OUTPUT_SIZE); // Downsample
+    finalCtx.drawImage(overlayCanvas, 0, 0);
+  }
+
   // ===== ANTICIPATION PHASE =====
-  for (let i = 0; i < ANIMATION.anticipationFrames; i++) {
-    const t = ANIMATION.anticipationFrames > 1
-      ? i / (ANIMATION.anticipationFrames - 1)
-      : 1;
+  const antFrames = anim.anticipation.frames;
+  for (let i = 0; i < antFrames; i++) {
+    const t = antFrames > 1 ? i / (antFrames - 1) : 1;
     const windBack = windBackDegrees * easeOutCubic(t);
 
-    finalCtx.drawImage(baseCanvas, 0, 0);
-
-    wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
+    wheelCtx.clearRect(0, 0, RENDER_SIZE, RENDER_SIZE);
     drawWheelSegments(wheelCtx, segments, windBack);
-    finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+    compositeFrame();
 
-    finalCtx.drawImage(overlayCanvas, 0, 0);
-
-    encoder.setDelay(60); // Slower for anticipation
+    encoder.setDelay(anim.anticipation.delayMs);
     encoder.addFrame(finalCtx);
 
-    // Yield
     await new Promise(resolve => setTimeout(resolve, 0));
   }
 
   // ===== SPIN PHASE =====
   for (let i = 0; i < totalSpinFrames; i++) {
     const t = i / totalSpinFrames;
-    const easedProgress = easeOutFriction(t);
-    currentAngle = spinStartAngle + easedProgress * spinDistance;
+    const easedProgress = compoundEase(t);
+    const currentAngle = spinStartAngle + easedProgress * spinDistance;
 
-    // Variable frame delay (faster during speed, slower during reveal)
     const delay = getSpinFrameDelay(t);
-    const dt = delay / 1000; // Convert to seconds
-
-    // Calculate delta angle for this frame
+    const dt = delay / 1000;
     const deltaAngle = Math.abs(currentAngle - previousAngle);
-    
-    // FIX #21: Calculate speed properly (was undefined before!)
     const speedDegPerSec = deltaAngle / dt;
 
-    // Segment ticking effect near the end
-    const tickThreshold = 0.85;
+    // Tick/snap effect near the end
     let displayAngle = currentAngle;
-
-    if (t > tickThreshold) {
+    if (t > cfg.tick.progressThreshold) {
       const currentSegmentIndex = Math.floor((normalizeAngle(currentAngle) / segmentAngle)) % numSegments;
-
-      // Add slight pause/snap when crossing segment boundary at low speed
-      // FIX #21: Use calculated speed instead of undefined variable
-      if (currentSegmentIndex !== lastSegmentIndex && speedDegPerSec < ANIMATION.tickSpeedThreshold) {
+      if (currentSegmentIndex !== lastSegmentIndex && speedDegPerSec < cfg.tick.speedThreshold) {
         displayAngle = Math.round(currentAngle / (segmentAngle / 2)) * (segmentAngle / 2);
       }
-
       lastSegmentIndex = currentSegmentIndex;
     }
 
-    // Composite frame
-    finalCtx.drawImage(baseCanvas, 0, 0);
-
-    // Draw wheel with motion blur (using degrees per second for consistent blur)
+    // Composite frame with motion blur
     drawWheelWithBlur(wheelCtx, segments, displayAngle, speedDegPerSec);
-    finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
-
-    finalCtx.drawImage(overlayCanvas, 0, 0);
+    compositeFrame();
 
     encoder.setDelay(delay);
     encoder.addFrame(finalCtx);
 
-    // Store previous angle for next iteration's delta calculation
     previousAngle = currentAngle;
 
-    // Yield every 5 frames
     if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
 
-  // ===== EXACT LANDING FRAME (prevents visual jump into celebration) =====
+  // ===== HOLD FRAMES (exact landing, no glow yet) =====
   const normalizedFinalAngle = normalizeAngle(totalSpin);
-  finalCtx.drawImage(baseCanvas, 0, 0);
-  wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
-  drawWheelSegments(wheelCtx, segments, normalizedFinalAngle, false, -1);
-  finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
-  finalCtx.drawImage(overlayCanvas, 0, 0);
-  encoder.setDelay(60);
-  encoder.addFrame(finalCtx);
+  for (let i = 0; i < anim.hold.frames; i++) {
+    wheelCtx.clearRect(0, 0, RENDER_SIZE, RENDER_SIZE);
+    drawWheelSegments(wheelCtx, segments, normalizedFinalAngle);
+    compositeFrame();
 
-  // ===== CELEBRATION PHASE (Winner Highlight) =====
-  for (let i = 0; i < ANIMATION.celebrationFrames; i++) {
-    finalCtx.drawImage(baseCanvas, 0, 0);
+    encoder.setDelay(anim.hold.delayMs);
+    encoder.addFrame(finalCtx);
+  }
 
-    // Pulsing winner highlight
-    const pulse = i % 10 < 5;
+  // ===== CELEBRATION PHASE (fade-in glow + pulse) =====
+  const celFrames = anim.celebration.frames;
+  const win = cfg.winner;
+  for (let i = 0; i < celFrames; i++) {
+    // Fade-in phase
+    let glowIntensity;
+    if (i < win.fadeInFrames) {
+      glowIntensity = (i + 1) / win.fadeInFrames;
+    } else {
+      glowIntensity = 1.0;
+    }
 
-    wheelCtx.clearRect(0, 0, CANVAS.width, CANVAS.height);
-    drawWheelSegments(wheelCtx, segments, normalizedFinalAngle, pulse, winnerIndex);
-    finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
+    // Sine pulse on top of full glow
+    if (i >= win.fadeInFrames) {
+      const pulseT = (i - win.fadeInFrames) / Math.max(1, celFrames - win.fadeInFrames);
+      const pulse = Math.sin(pulseT * Math.PI * 2 * win.pulseFrequency) * win.pulseAmplitude;
+      glowIntensity = Math.min(1.0, Math.max(0.3, glowIntensity + pulse));
+    }
 
-    finalCtx.drawImage(overlayCanvas, 0, 0);
+    wheelCtx.clearRect(0, 0, RENDER_SIZE, RENDER_SIZE);
+    drawWheelSegments(wheelCtx, segments, normalizedFinalAngle, winnerIndex, glowIntensity);
+    compositeFrame();
 
-    encoder.setDelay(50);
+    encoder.setDelay(anim.celebration.delayMs);
     encoder.addFrame(finalCtx);
 
-    // Yield every 5 frames
     if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
   }
 
@@ -628,33 +553,32 @@ export async function generateWheelGif(players, winnerIndex) {
   return encoder.out.getData();
 }
 
-function computeSpinPhaseDurationMs() {
-  const totalSpinFrames = Math.floor(ANIMATION.duration * ANIMATION.baseFps);
-  if (totalSpinFrames <= 0) return 0;
+// ==================== DURATION CALCULATION ====================
 
+function computeSpinPhaseDurationMs() {
+  const totalSpinFrames = Math.floor(cfg.animation.durationSec * cfg.animation.fps);
+  if (totalSpinFrames <= 0) return 0;
   let total = 0;
   for (let i = 0; i < totalSpinFrames; i++) {
-    const t = i / totalSpinFrames;
-    total += getSpinFrameDelay(t);
+    total += getSpinFrameDelay(i / totalSpinFrames);
   }
   return total;
 }
 
 function computeWheelGifDurationMs() {
-  const anticipationMs = ANIMATION.anticipationFrames * 60;
+  const anim = cfg.animation;
+  const anticipationMs = anim.anticipation.frames * anim.anticipation.delayMs;
   const spinMs = computeSpinPhaseDurationMs();
-  const landingMs = 60;
-  const celebrationMs = ANIMATION.celebrationFrames * 50;
-  return anticipationMs + spinMs + landingMs + celebrationMs;
+  const holdMs = anim.hold.frames * anim.hold.delayMs;
+  const celebrationMs = anim.celebration.frames * anim.celebration.delayMs;
+  return anticipationMs + spinMs + holdMs + celebrationMs;
 }
 
 export const WHEEL_GIF_DURATION_MS = computeWheelGifDurationMs();
 
-/**
- * Generate a static wheel image (for preview)
- */
+// ==================== STATIC WHEEL ====================
+
 export async function generateStaticWheel(players) {
-  // Input validation
   if (!Array.isArray(players) || players.length === 0) {
     throw new Error('[WheelGenerator] players must be a non-empty array');
   }
@@ -662,39 +586,30 @@ export async function generateStaticWheel(players) {
   const segments = preCalculateSegments(players);
   const { baseCanvas, overlayCanvas } = await createStaticLayers();
 
-  const wheelCanvas = createCanvas(CANVAS.width, CANVAS.height);
+  const wheelCanvas = createCanvas(RENDER_SIZE, RENDER_SIZE);
   const wheelCtx = wheelCanvas.getContext('2d', { alpha: true });
 
-  const finalCanvas = createCanvas(CANVAS.targetWidth, CANVAS.targetHeight);
+  const finalCanvas = createCanvas(OUTPUT_SIZE, OUTPUT_SIZE);
   const finalCtx = finalCanvas.getContext('2d', { alpha: false });
-
   finalCtx.imageSmoothingEnabled = true;
   finalCtx.imageSmoothingQuality = 'high';
 
   finalCtx.drawImage(baseCanvas, 0, 0);
-
   drawWheelSegments(wheelCtx, segments, 0);
-  finalCtx.drawImage(wheelCanvas, 0, 0, CANVAS.targetWidth, CANVAS.targetHeight);
-
+  finalCtx.drawImage(wheelCanvas, 0, 0, OUTPUT_SIZE, OUTPUT_SIZE);
   finalCtx.drawImage(overlayCanvas, 0, 0);
 
   return finalCanvas.toBuffer('image/png');
 }
 
+// ==================== CACHE MANAGEMENT ====================
+
 export function clearAssetsCache() {
   imageCache.clear();
 }
 
-/**
- * Preload static wheel assets into cache.
- */
 export async function prewarmWheelAssets() {
-  const assets = [
-    'roulette-wheel-bg.png',
-    'roulette-wheel-frame.png',
-    'roulette-wheel-center.png',
-    'roulette-wheel-pointer.png',
-  ];
-  await Promise.allSettled(assets.map(name => loadAsset(name)));
-  logger.info(`[WheelGenerator] Asset prewarm complete (${assets.length} assets)`);
+  const assetPaths = Object.values(cfg.assets);
+  await Promise.allSettled(assetPaths.map(p => loadAsset(p)));
+  logger.info(`[WheelGenerator] Asset prewarm complete (${assetPaths.length} assets)`);
 }
