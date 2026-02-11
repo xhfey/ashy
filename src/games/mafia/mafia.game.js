@@ -29,6 +29,7 @@ import {
   TEAMS, getTeam,
   HINT_COST, MAX_HINTS_PER_PLAYER_PER_ROUND, DEAD_WINNER_RATIO,
   VOTE_EDIT_THROTTLE_MS,
+  MAFIA_MAX_MISSES, SILENT_PHASE_DURATION,
 } from './mafia.constants.js';
 import logger from '../../utils/logger.js';
 
@@ -166,6 +167,9 @@ export async function startMafiaGame(session, channel) {
 
       // Phase resolution
       currentPhaseResolve: null,
+
+      // Inactivity tracking
+      mafiaConsecutiveMisses: 0,
     };
 
     activeGames.set(session.id, gs);
@@ -231,8 +235,8 @@ async function runRound(gs, session) {
       await runNightDoctor(gs, session);
       if (gs.state === 'ENDED') break;
     } else if (doctorId) {
-      // Doctor is dead, skip phase with notification
-      await gs.channel.send({ content: '💀 تم تخطي مرحلة الطبيب (الطبيب ميت)' });
+      // Doctor is dead, run SILENT PHASE (fake think)
+      await runSilentPhase(gs, session, PHASES.NIGHT_DOCTOR);
     }
 
     // Detective only if enabled AND alive
@@ -241,8 +245,8 @@ async function runRound(gs, session) {
       await runNightDetective(gs, session);
       if (gs.state === 'ENDED') break;
     } else if (gs.detectiveEnabled && detectiveId) {
-      // Detective is dead, skip phase with notification
-      await gs.channel.send({ content: '💀 تم تخطي مرحلة المحقق (المحقق ميت)' });
+      // Detective is dead, run SILENT PHASE (fake think)
+      await runSilentPhase(gs, session, PHASES.NIGHT_DETECTIVE);
     }
 
     // Resolve night
@@ -301,6 +305,15 @@ async function runNightDetective(gs, session) {
   });
 }
 
+async function runSilentPhase(gs, session, phase) {
+  const duration = randomInt(SILENT_PHASE_DURATION.MIN_MS, SILENT_PHASE_DURATION.MAX_MS);
+  // We still "change phase" so buttons from other phases are blocked
+  await changePhase(gs, session, phase);
+
+  // No UI update - just wait silently
+  await delay(duration, gs.abortController.signal);
+}
+
 /**
  * Generic timed phase runner
  * Posts UI, sets timer, resolves when phase ends (by action or timeout)
@@ -322,9 +335,12 @@ async function runTimedPhase(gs, session, phase, durationMs, setupFn) {
 
   gs.timeouts.set('phase', durationMs, async () => {
     await withLock(session.id, async () => {
-      if (gs.phase !== phase) return; // Already moved on
+      // Zombie Fix: Wrap in try/finally to ensure resolution
       try {
+        if (gs.phase !== phase) return; // Already moved on
         await onPhaseTimeout(gs, session, phase);
+      } catch (err) {
+        logger.error(`[Mafia] Error in phase timeout ${phase}:`, err);
       } finally {
         resolveCurrentPhaseWait(gs);
       }
@@ -337,7 +353,20 @@ async function runTimedPhase(gs, session, phase, durationMs, setupFn) {
 async function onPhaseTimeout(gs, session, phase) {
   switch (phase) {
     case PHASES.NIGHT_MAFIA: {
+      const votes = gs.mafiaVotes.size;
       resolveMafiaVotes(gs);
+
+      if (votes === 0) {
+        gs.mafiaConsecutiveMisses++;
+        if (gs.mafiaConsecutiveMisses >= MAFIA_MAX_MISSES) {
+          // Mafia Forfeit
+          await endMafiaGame(gs, session, { winningTeam: TEAMS.TEAM_1, reason: 'MAFIA_FORFEIT' });
+          return;
+        }
+      } else {
+        gs.mafiaConsecutiveMisses = 0;
+      }
+
       await updateControlPanel(gs, session, MESSAGES.MAFIA_CHOSE);
       break;
     }
@@ -730,6 +759,9 @@ async function handleMafiaVote(ctx, gs, targetId) {
   const targets = getAliveNonMafia(gs);
   const pickMention = `<@${targetId}>`;
 
+  // Early Phase End
+  await checkPhaseCompletion(gs, session);
+
   return interaction.update({
     content: `${MESSAGES.MAFIA_ACTION_TITLE}\n${MESSAGES.MAFIA_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.MAFIA_VOTE),
@@ -767,6 +799,9 @@ async function handleDoctorProtect(ctx, gs, targetId) {
   const targets = getAlivePlayers(gs).filter(p => p.userId !== gs.lastDoctorProtectedUserId);
   const pickMention = `<@${targetId}>`;
 
+  // Early Phase End
+  await checkPhaseCompletion(gs, session);
+
   return interaction.update({
     content: `${MESSAGES.DOCTOR_ACTION_TITLE}\n${MESSAGES.DOCTOR_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DOCTOR_PROTECT),
@@ -803,6 +838,9 @@ async function handleDetectiveCheck(ctx, gs, targetId) {
   const targets = getAlivePlayers(gs).filter(p => p.userId !== userId);
   const pickMention = `<@${targetId}>`;
 
+  // Early Phase End
+  await checkPhaseCompletion(gs, session);
+
   return interaction.update({
     content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}\n${MESSAGES.DETECTIVE_LAST_RESULT(gs.detectiveLastResultText)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DETECTIVE_CHECK),
@@ -831,6 +869,7 @@ async function handleDayVote(ctx, gs, targetId) {
 
   gs.dayVotes.set(userId, targetId);
   scheduleVoteMessageUpdate(gs, session);
+  await checkPhaseCompletion(gs, session);
 }
 
 async function handleDayVoteSkip(ctx, gs) {
@@ -850,6 +889,7 @@ async function handleDayVoteSkip(ctx, gs) {
 
   gs.dayVotes.set(userId, 'SKIP');
   scheduleVoteMessageUpdate(gs, session);
+  await checkPhaseCompletion(gs, session);
 }
 
 async function handleHintPurchase(ctx, gs) {
@@ -1187,6 +1227,60 @@ async function updateControlPanel(gs, session, content) {
     });
   } catch (error) {
     logger.warn('[Mafia] Failed to update control panel:', error.message);
+  }
+}
+
+async function checkPhaseCompletion(gs, session) {
+  // If we are pending an update that hasn't fired yet, fire it now so UI is consistent before phase end
+  if (gs.pendingVoteUpdate) {
+    clearTimeout(gs.pendingVoteUpdate);
+    gs.pendingVoteUpdate = null;
+    await updateVoteMessage(gs, session);
+  }
+
+  let shouldComplete = false;
+
+  switch (gs.phase) {
+    case PHASES.NIGHT_MAFIA: {
+      const aliveMafia = Object.values(gs.players).filter(p => p.alive && p.role === ROLES.MAFIA);
+      // Wait for ANY mafia vote? Or ALL? 
+      // Usually mafia vote is a group decision, but for simplicity/speed let's wait until ALL alive mafia have voted.
+      const votes = gs.mafiaVotes.size;
+      shouldComplete = (votes >= aliveMafia.length);
+      break;
+    }
+    case PHASES.NIGHT_DOCTOR: {
+      shouldComplete = !!gs.doctorProtectUserId;
+      break;
+    }
+    case PHASES.NIGHT_DETECTIVE: {
+      shouldComplete = !!gs.detectiveInvestigateUserId;
+      break;
+    }
+    case PHASES.DAY_VOTE: {
+      const alivePlayers = getAlivePlayers(gs);
+      const castVotes = gs.dayVotes.size;
+      shouldComplete = (castVotes >= alivePlayers.length);
+      break;
+    }
+  }
+
+  if (shouldComplete) {
+    logger.info(`[Mafia] Phase ${gs.phase} completed by actions, advancing immediately.`);
+    // Cancel the timer
+    gs.timeouts.clear('phase');
+
+    // Resolve the phase
+    // We must ensure this runs on the lock loop to avoid race conditions with the timer firing right now
+    // But checkPhaseCompletion is called FROM the lock loop (handlers), so it is safe to act.
+
+    try {
+      await onPhaseTimeout(gs, session, gs.phase);
+    } catch (err) {
+      logger.error(`[Mafia] Error in early phase completion ${gs.phase}:`, err);
+    } finally {
+      resolveCurrentPhaseWait(gs);
+    }
   }
 }
 

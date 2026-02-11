@@ -110,6 +110,10 @@ Current focus: **Reliability + Expansion Foundation** ✅
 
 **Read `CLAUDE.md` before making any changes.**
 
+### Core Guidelines
+1. **Restart Policy**: Active games (Mafia, Roulette) are **CANCELLED** on bot restart. State is NOT saved to database (by design, to avoid zombie states).
+2. **Timestamps**: Always use Discord `<t:EPOCH:R>` for countdowns. **NEVER** edit messages in a loop to update a timer.
+
 ## 📄 License
 
 MIT

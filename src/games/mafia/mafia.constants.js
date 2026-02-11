@@ -132,6 +132,17 @@ const NIGHT_DETECTIVE_SECONDS = Math.floor(TIMERS.NIGHT_DETECTIVE_MS / 1000);
 const DAY_DISCUSS_SECONDS = Math.floor(TIMERS.DAY_DISCUSS_MS / 1000);
 const DAY_VOTE_SECONDS = Math.floor(TIMERS.DAY_VOTE_MS / 1000);
 
+// ==================== INACTIVITY LIMITS ====================
+
+export const MAFIA_MAX_MISSES = 2; // Mafia loses if they miss 2 consecutive nights
+
+// ==================== SILENT PHASE ====================
+
+export const SILENT_PHASE_DURATION = {
+  MIN_MS: 10000,
+  MAX_MS: 25000,
+};
+
 // ==================== MESSAGES ====================
 
 export const MESSAGES = {
