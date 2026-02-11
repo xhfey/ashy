@@ -11,6 +11,7 @@
  */
 
 import { createCanvas, loadImage, registerFont } from 'canvas';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from '../../utils/logger.js';
@@ -37,14 +38,74 @@ if (typeof cacheCleanupTimer.unref === 'function') cacheCleanupTimer.unref();
 
 try {
   const fontPath = path.join(PROJECT_ROOT, 'assets/fonts');
-  registerFont(path.join(fontPath, 'Cairo-Bold.ttf'), { family: 'Cairo', weight: '700' });
+  const register = (filename, family, weight) => {
+    const fullPath = path.join(fontPath, filename);
+    if (!fs.existsSync(fullPath)) return;
+    registerFont(fullPath, { family, weight });
+  };
+
+  // Readability-focused UI fonts.
+  register('NotoSansArabicUI-ExtraBold.ttf', 'Noto Sans Arabic UI', '800');
+  register('NotoSansArabicUI-Bold.ttf', 'Noto Sans Arabic UI', '700');
+  register('NotoSansArabicUI-Medium.ttf', 'Noto Sans Arabic UI', '500');
+  register('NotoSans-Bold.ttf', 'Noto Sans', '700');
+  register('NotoSans-Medium.ttf', 'Noto Sans', '500');
+  register('NotoSansSymbols2-Regular.ttf', 'Noto Sans Symbols 2', '400');
+
+  // Fallback fonts.
+  register('Cairo-Bold.ttf', 'Cairo', '700');
+  register('ElMessiri-Bold.ttf', 'El Messiri', '700');
+  register('Tajawal-ExtraBold.ttf', 'Tajawal ExtraBold', '800');
+  register('Tajawal-Bold.ttf', 'Tajawal Bold', '700');
+  register('Tajawal-Medium.ttf', 'Tajawal Medium', '500');
 } catch (e) {
-  logger.warn('[MafiaImages] Failed to register Cairo font, using system fallback:', e.message);
+  logger.warn('[MafiaImages] Font registration warning:', e.message);
 }
 
 // ==================== CORE HELPERS ====================
 
 const RENDER_SCALE = CFG.canvas.supersample;
+
+function sanitizeDisplayName(raw, maxChars = 14) {
+  let name = typeof raw === 'string' ? raw : '';
+  name = name
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/\uFE0F/g, '')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!name) return 'Unknown';
+  const chars = Array.from(name);
+  if (chars.length > maxChars) {
+    return `${chars.slice(0, Math.max(1, maxChars - 1)).join('')}…`;
+  }
+  return name;
+}
+
+function isolateBidi(text) {
+  return `\u2068${text}\u2069`;
+}
+
+function fitFontSize(ctx, text, options = {}) {
+  const {
+    baseSize,
+    minSize,
+    weight = 500,
+    family,
+    maxWidth,
+  } = options;
+
+  let size = baseSize;
+  while (size > minSize) {
+    ctx.font = `${weight} ${size}px ${family}`;
+    if (ctx.measureText(text).width <= maxWidth) break;
+    size -= 1;
+  }
+  return size;
+}
 
 async function loadCachedImage(assetPath) {
   if (!assetPath) return null;
@@ -111,9 +172,9 @@ function drawGlowText(ctx, text, x, y, options = {}) {
     align = 'center',
     baseline = 'middle',
     glowColor = 'rgba(0,0,0,0.65)',
-    glowBlur = 10,
+    glowBlur = 5,
     outlineColor = 'rgba(0,0,0,0.5)',
-    outlineWidth = 1.5,
+    outlineWidth = 0.8,
   } = options;
 
   ctx.save();
@@ -125,7 +186,7 @@ function drawGlowText(ctx, text, x, y, options = {}) {
     ctx.shadowColor = glowColor;
     ctx.shadowBlur = glowBlur;
     ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 2;
+    ctx.shadowOffsetY = 0;
   }
 
   ctx.fillStyle = color;
@@ -164,7 +225,7 @@ function drawCircularIcon(ctx, img, cx, cy, size, borderWidth) {
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.lineWidth = borderWidth || CFG.icons.borderWidth;
+  ctx.lineWidth = borderWidth || CFG.icons.borderWidth || 2;
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
   ctx.stroke();
   ctx.restore();
@@ -182,7 +243,7 @@ function drawDetectiveFallback(ctx, cx, cy, size) {
   ctx.fillStyle = CFG.colors.detectiveFallbackBg;
   ctx.fill();
   ctx.strokeStyle = CFG.colors.detectiveFallbackBorder;
-  ctx.lineWidth = CFG.icons.borderWidth;
+  ctx.lineWidth = CFG.icons.borderWidth || 3;
   ctx.stroke();
 
   const glassR = size * 0.18;
@@ -295,9 +356,9 @@ function drawRoleIcon(ctx, cx, cy, roleKey, iconImg, iconSize) {
 
   const name = ROLE_NAMES[roleKey] || roleKey;
   drawGlowText(ctx, name, cx, cy + CFG.roleText.offsetY, {
-    font: `700 ${CFG.roleText.fontSize}px ${CFG.fonts.role}`,
+    font: `700 ${CFG.roleText.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`,
     color: CFG.colors.roleText,
-    glowBlur: 6,
+    glowBlur: 3,
     glowColor: 'rgba(0,0,0,0.8)',
   });
 }
@@ -315,6 +376,46 @@ function flattenTeamRoles(dist, teamRoleKeys) {
     }
   }
   return entries;
+}
+
+function drawRoleRows(ctx, roles, roleIcons, options = {}) {
+  const {
+    centerX,
+    startY,
+    availableWidth,
+    iconSize,
+    maxPerRow,
+    rowGap,
+  } = options;
+
+  if (roles.length <= maxPerRow) {
+    const layout = calcSpacing(roles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
+    const startX = centerX - layout.totalWidth / 2;
+    for (let i = 0; i < roles.length; i++) {
+      const cx = roles.length === 1 ? centerX : startX + i * layout.spacing;
+      drawRoleIcon(ctx, cx, startY, roles[i], roleIcons[roles[i]], iconSize);
+    }
+    return;
+  }
+
+  const row1Count = Math.ceil(roles.length / 2);
+  const row1 = roles.slice(0, row1Count);
+  const row2 = roles.slice(row1Count);
+
+  const layout1 = calcSpacing(row1.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
+  const row1StartX = centerX - layout1.totalWidth / 2;
+  for (let i = 0; i < row1.length; i++) {
+    const cx = row1.length === 1 ? centerX : row1StartX + i * layout1.spacing;
+    drawRoleIcon(ctx, cx, startY, row1[i], roleIcons[row1[i]], iconSize);
+  }
+
+  const row2Y = startY + rowGap;
+  const layout2 = calcSpacing(row2.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
+  const row2StartX = centerX - layout2.totalWidth / 2;
+  for (let i = 0; i < row2.length; i++) {
+    const cx = row2.length === 1 ? centerX : row2StartX + i * layout2.spacing;
+    drawRoleIcon(ctx, cx, row2Y, row2[i], roleIcons[row2[i]], iconSize);
+  }
 }
 
 // ==================== WIN BANNER HELPERS ====================
@@ -428,12 +529,13 @@ function drawDefaultAvatar(ctx, cx, cy, size, displayName) {
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.fillStyle = CFG.winBanner.defaultAvatarBg;
+  ctx.fillStyle = CFG.colors.defaultAvatarBg || '#5865F2';
   ctx.fill();
 
-  const initial = (displayName || '?')[0];
+  const safe = sanitizeDisplayName(displayName, 2);
+  const initial = Array.from(safe)[0] || '?';
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = `700 ${Math.floor(size * 0.4)}px ${CFG.fonts.label}`;
+  ctx.font = `700 ${Math.floor(size * 0.4)}px ${CFG.fonts.small || CFG.fonts.label}`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(initial, cx, cy);
@@ -449,6 +551,7 @@ async function drawPlayerAvatar(ctx, player, cx, cy, cfg, options = {}) {
     dimmed = false,
     accentColor = null,
     roleIconImg = null,
+    nameMaxWidth = null,
   } = options;
 
   const size = cfg.avatarSize;
@@ -507,12 +610,24 @@ async function drawPlayerAvatar(ctx, player, cx, cy, cfg, options = {}) {
 
   // Display name below
   const nameY = cy + cfg.nameOffsetY;
-  const nameColor = dimmed ? 'rgba(255,255,255,0.4)' : '#FFFFFF';
-  drawGlowText(ctx, player.displayName || 'Unknown', cx, nameY, {
-    font: `700 ${cfg.nameFontSize}px ${CFG.fonts.role}`,
+  const nameColor = dimmed ? (CFG.colors.dimmedText || 'rgba(255,255,255,0.65)') : (CFG.colors.playerName || '#FFFFFF');
+  const rawName = sanitizeDisplayName(player.displayName, cfg.nameMaxChars || 14);
+  const safeName = isolateBidi(rawName);
+  const maxNameWidth = Math.max(90, nameMaxWidth ?? Math.max(cfg.avatarSize * 2, 160));
+  const fittedSize = fitFontSize(ctx, safeName, {
+    baseSize: cfg.nameFontSize,
+    minSize: Math.max(13, Math.floor(cfg.nameFontSize * 0.62)),
+    weight: 700,
+    family: CFG.fonts.small || CFG.fonts.body || CFG.fonts.label,
+    maxWidth: maxNameWidth,
+  });
+
+  drawGlowText(ctx, safeName, cx, nameY, {
+    font: `700 ${fittedSize}px ${CFG.fonts.small || CFG.fonts.body || CFG.fonts.label}`,
     color: nameColor,
-    glowBlur: dimmed ? 3 : 6,
+    glowBlur: dimmed ? 1.5 : 2.2,
     glowColor: 'rgba(0,0,0,0.8)',
+    outlineWidth: dimmed ? 0.5 : 0.7,
   });
 }
 
@@ -545,7 +660,19 @@ export async function prewarmMafiaAssets() {
 export async function generateTeamsBanner(dist, detectiveEnabled) {
   if (!CFG.enabled) return null;
 
-  const { width, height } = CFG.canvas;
+  const { width } = CFG.canvas;
+
+  const team2Roles = flattenTeamRoles(dist, ['MAFIA']);
+  const team1RoleKeys = ['CITIZEN', 'DOCTOR'];
+  if (detectiveEnabled && dist.DETECTIVE > 0) team1RoleKeys.push('DETECTIVE');
+  const team1Roles = flattenTeamRoles(dist, team1RoleKeys);
+
+  const maxPerRow = CFG.icons.maxPerRow || 4;
+  const rowGap = CFG.icons.rowGap || 200;
+  const needsMultiRow = team1Roles.length > maxPerRow || team2Roles.length > maxPerRow;
+  const height = needsMultiRow
+    ? CFG.canvas.height + (CFG.canvas.dynamicHeightIncrease || 320)
+    : CFG.canvas.height;
 
   try {
     const renderCanvas = createCanvas(width * RENDER_SCALE, height * RENDER_SCALE);
@@ -553,7 +680,7 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
     ctx.scale(RENDER_SCALE, RENDER_SCALE);
 
     // 1. Background + overlay
-    await drawBackground(ctx, width, height, 0.3);
+    await drawBackground(ctx, width, height, CFG.overlayAlpha?.teams ?? 0.16);
 
     // 2. Team labels
     const labelFont = `700 ${CFG.teamLabels.fontSize}px ${CFG.fonts.label}`;
@@ -561,78 +688,74 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
     drawGlowText(ctx, 'الفريق الثاني', CFG.teamLabels.team2.x, CFG.teamLabels.team2.y, {
       font: labelFont,
       color: CFG.colors.team2,
-      glowColor: CFG.colors.team2Glow,
-      glowBlur: 20,
-      outlineWidth: 2,
-      outlineColor: CFG.colors.labelOutline,
+      glowColor: CFG.colors.team2Glow || 'rgba(239,68,68,0.45)',
+      glowBlur: 6,
+      outlineWidth: 0.8,
+      outlineColor: 'rgba(0,0,0,0.32)',
     });
 
     drawGlowText(ctx, 'الفريق الاول', CFG.teamLabels.team1.x, CFG.teamLabels.team1.y, {
       font: labelFont,
       color: CFG.colors.team1,
-      glowColor: CFG.colors.team1Glow,
-      glowBlur: 15,
-      outlineWidth: 2,
-      outlineColor: CFG.colors.labelOutline,
+      glowColor: CFG.colors.team1Glow || 'rgba(74,222,128,0.45)',
+      glowBlur: 6,
+      outlineWidth: 0.8,
+      outlineColor: 'rgba(0,0,0,0.32)',
     });
 
     // 3. Load role icons
     const roleIcons = await loadRoleIcons();
 
-    // 4. Team 2 roles (Mafia — left side) — one icon per mafia member
-    const team2Roles = flattenTeamRoles(dist, ['MAFIA']);
+    // 4. Team 2 roles (Mafia — left side)
     const team2CenterX = CFG.teamLabels.team2.x;
     const iconY = CFG.teamLabels.team2.y + CFG.icons.offsetY;
     const iconSize = CFG.icons.size;
 
-    // Available width for team 2 (left half of canvas with margins)
-    const team2Available = (width / 2 - 80);
-    const team2Layout = calcSpacing(team2Roles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, team2Available);
-    const team2StartX = team2CenterX - team2Layout.totalWidth / 2;
+    // Available width for each side
+    const team2Available = width / 2 - 90;
+    drawRoleRows(ctx, team2Roles, roleIcons, {
+      centerX: team2CenterX,
+      startY: iconY,
+      availableWidth: team2Available,
+      iconSize,
+      maxPerRow,
+      rowGap,
+    });
 
-    for (let i = 0; i < team2Roles.length; i++) {
-      const cx = team2StartX + i * team2Layout.spacing;
-      drawRoleIcon(ctx, cx, iconY, team2Roles[i], roleIcons[team2Roles[i]], iconSize);
-      if (i % 3 === 2) await new Promise(r => setImmediate(r));
-    }
-
-    // 5. Team 1 roles (Citizens — right side) — one icon per citizen/doctor/detective
-    const team1RoleKeys = ['CITIZEN', 'DOCTOR'];
-    if (detectiveEnabled && dist.DETECTIVE > 0) team1RoleKeys.push('DETECTIVE');
-    const team1Roles = flattenTeamRoles(dist, team1RoleKeys);
-
+    // 5. Team 1 roles (Citizens — right side)
     const team1CenterX = CFG.teamLabels.team1.x;
-    const team1Available = (width / 2 - 80);
-    const team1Layout = calcSpacing(team1Roles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, team1Available);
-    const team1StartX = team1CenterX - team1Layout.totalWidth / 2;
-
-    for (let i = 0; i < team1Roles.length; i++) {
-      const cx = team1StartX + i * team1Layout.spacing;
-      drawRoleIcon(ctx, cx, iconY, team1Roles[i], roleIcons[team1Roles[i]], iconSize);
-      if (i % 3 === 2) await new Promise(r => setImmediate(r));
-    }
+    const team1Available = width / 2 - 90;
+    drawRoleRows(ctx, team1Roles, roleIcons, {
+      centerX: team1CenterX,
+      startY: iconY,
+      availableWidth: team1Available,
+      iconSize,
+      maxPerRow,
+      rowGap,
+    });
 
     // 6. Team objectives at bottom corners (Fizbo style)
-    const objFont = `700 ${CFG.objectives.fontSize}px ${CFG.fonts.label}`;
+    const objY = needsMultiRow ? height - 72 : CFG.objectives.y;
+    const objFont = `700 ${CFG.objectives.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`;
     const dotR = 7;
 
     // Team 1 objective (right side)
     const obj1X = CFG.objectives.team1.x;
-    drawColoredDot(ctx, obj1X - 180, CFG.objectives.y, dotR, CFG.colors.team1);
-    drawGlowText(ctx, 'الهدف : كشف المافيا قبل ما ينقتلون', obj1X, CFG.objectives.y, {
+    drawColoredDot(ctx, obj1X - 180, objY, dotR, CFG.colors.team1);
+    drawGlowText(ctx, 'الهدف : كشف المافيا قبل ما ينقتلون', obj1X, objY, {
       font: objFont,
       color: CFG.colors.team1,
-      glowBlur: 8,
+      glowBlur: 3,
       glowColor: 'rgba(60, 255, 107, 0.4)',
     });
 
     // Team 2 objective (left side)
     const obj2X = CFG.objectives.team2.x;
-    drawColoredDot(ctx, obj2X - 180, CFG.objectives.y, dotR, CFG.colors.team2);
-    drawGlowText(ctx, 'الهدف : اغتيال جميع اعضاء الشعب', obj2X, CFG.objectives.y, {
+    drawColoredDot(ctx, obj2X - 180, objY, dotR, CFG.colors.team2);
+    drawGlowText(ctx, 'الهدف : اغتيال جميع اعضاء الشعب', obj2X, objY, {
       font: objFont,
       color: CFG.colors.team2,
-      glowBlur: 8,
+      glowBlur: 3,
       glowColor: 'rgba(255, 60, 60, 0.4)',
     });
 
@@ -660,21 +783,34 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
 export async function generateWinBanner(winningTeam, players, roundsPlayed) {
   if (!CFG.enabled) return null;
 
-  const { width, height } = CFG.canvas;
+  const { width } = CFG.canvas;
   const WB = CFG.winBanner;
+  const maxWinnersPerRow = WB.winners.maxPerRow || 4;
+  const maxLosersPerRow = WB.losers.maxPerRow || 4;
+
+  const winners = players.filter(p => getTeam(p.role) === winningTeam);
+  const losers = players.filter(p => getTeam(p.role) !== winningTeam);
+  const winnersMultiRow = winners.length > maxWinnersPerRow;
+  const losersMultiRow = losers.length > maxLosersPerRow;
+
+  let height = CFG.canvas.height;
+  if (winnersMultiRow) height += 220;
+  if (losersMultiRow) height += 170;
 
   try {
     const renderCanvas = createCanvas(width * RENDER_SCALE, height * RENDER_SCALE);
     const ctx = renderCanvas.getContext('2d');
     ctx.scale(RENDER_SCALE, RENDER_SCALE);
 
-    // 1. Background + overlay (lighter than teams banner for drama)
-    await drawBackground(ctx, width, height, WB.overlayAlpha);
+    // 1. Background + overlay
+    await drawBackground(ctx, width, height, CFG.overlayAlpha?.win ?? WB.overlayAlpha ?? 0.16);
 
     // 2. Theme colors
     const isTeam1 = winningTeam === TEAMS.TEAM_1;
     const accentColor = isTeam1 ? CFG.colors.team1 : CFG.colors.team2;
-    const accentGlow = isTeam1 ? CFG.colors.team1Glow : CFG.colors.team2Glow;
+    const accentGlow = isTeam1
+      ? (CFG.colors.team1Glow || 'rgba(74,222,128,0.45)')
+      : (CFG.colors.team2Glow || 'rgba(239,68,68,0.45)');
     const teamName = isTeam1 ? 'الفريق الاول' : 'الفريق الثاني';
     const teamSubtitle = isTeam1 ? 'المدنيون' : 'المافيا';
 
@@ -686,12 +822,12 @@ export async function generateWinBanner(winningTeam, players, roundsPlayed) {
 
     // 5. Title
     drawGlowText(ctx, `فاز ${teamName}`, width / 2, WB.title.y, {
-      font: `700 ${WB.title.fontSize}px ${CFG.fonts.label}`,
+      font: `700 ${WB.title.fontSize}px ${CFG.fonts.title || CFG.fonts.label}`,
       color: accentColor,
       glowColor: accentGlow,
-      glowBlur: 30,
-      outlineWidth: 2.5,
-      outlineColor: 'rgba(0,0,0,0.6)',
+      glowBlur: 7,
+      outlineWidth: 0.9,
+      outlineColor: 'rgba(0,0,0,0.35)',
     });
 
     // 6. Subtitle
@@ -699,91 +835,121 @@ export async function generateWinBanner(winningTeam, players, roundsPlayed) {
       font: `700 ${WB.title.subtitleFontSize}px ${CFG.fonts.label}`,
       color: accentColor,
       glowColor: accentGlow,
-      glowBlur: 12,
-      outlineWidth: 1,
+      glowBlur: 4,
+      outlineWidth: 0.6,
     });
 
     // 7. Divider
-    drawDivider(ctx, WB.dividerY, width, 0.4);
+    drawDivider(ctx, WB.dividerY, width, 0.28);
 
-    // 8. Split players
-    const winners = players.filter(p => getTeam(p.role) === winningTeam);
-    const losers = players.filter(p => getTeam(p.role) !== winningTeam);
-
-    // 9. Load role icons
+    // 8. Load role icons
     const roleIcons = await loadRoleIcons();
 
-    // 10. Winners label
+    // 9. Winners label
     drawGlowText(ctx, 'الفائزون', width / 2, WB.winners.labelY, {
       font: `700 ${WB.winners.labelFontSize}px ${CFG.fonts.label}`,
       color: '#FFD700',
       glowColor: 'rgba(255, 215, 0, 0.5)',
-      glowBlur: 15,
+      glowBlur: 4,
     });
 
-    // 11. Draw winner avatars in horizontal row
-    const wMargin = 100;
-    const wLayout = calcSpacing(winners.length, WB.winners.avatarSpacing, 90, width - wMargin * 2);
-    const wStartX = (width / 2) - wLayout.totalWidth / 2;
+    // 10. Winner avatars (single/multi row)
+    const drawPlayerRows = async (list, cfg, yStart, opts = {}) => {
+      const maxPerRow = cfg.maxPerRow || 4;
+      const rowGap = cfg.rowGap || 180;
+      const margin = opts.margin || 100;
+      const minSpacing = opts.minSpacing || 80;
 
-    for (let i = 0; i < winners.length; i++) {
-      const p = winners[i];
-      const cx = wStartX + i * wLayout.spacing;
-      const cy = WB.winners.avatarY;
+      if (list.length <= maxPerRow) {
+        const layout = calcSpacing(list.length, cfg.avatarSpacing, minSpacing, width - margin * 2);
+        const startX = width / 2 - layout.totalWidth / 2;
+        const nameWidth = Math.max(90, Math.min(cfg.avatarSize * 1.9, layout.spacing * 0.84));
+        for (let i = 0; i < list.length; i++) {
+          const p = list[i];
+          const cx = list.length === 1 ? width / 2 : startX + i * layout.spacing;
+          await drawPlayerAvatar(ctx, p, cx, yStart, cfg, { ...opts.avatarOpts(p), nameMaxWidth: nameWidth });
+        }
+        return { rows: 1, yEnd: yStart };
+      }
 
-      await drawPlayerAvatar(ctx, p, cx, cy, WB.winners, {
+      const row1Count = Math.ceil(list.length / 2);
+      const row1 = list.slice(0, row1Count);
+      const row2 = list.slice(row1Count);
+
+      const layout1 = calcSpacing(row1.length, cfg.avatarSpacing, minSpacing, width - margin * 2);
+      const row1StartX = width / 2 - layout1.totalWidth / 2;
+      const row1NameWidth = Math.max(90, Math.min(cfg.avatarSize * 1.9, layout1.spacing * 0.84));
+      for (let i = 0; i < row1.length; i++) {
+        const p = row1[i];
+        const cx = row1.length === 1 ? width / 2 : row1StartX + i * layout1.spacing;
+        await drawPlayerAvatar(ctx, p, cx, yStart, cfg, { ...opts.avatarOpts(p), nameMaxWidth: row1NameWidth });
+      }
+
+      const row2Y = yStart + rowGap;
+      const layout2 = calcSpacing(row2.length, cfg.avatarSpacing, minSpacing, width - margin * 2);
+      const row2StartX = width / 2 - layout2.totalWidth / 2;
+      const row2NameWidth = Math.max(90, Math.min(cfg.avatarSize * 1.9, layout2.spacing * 0.84));
+      for (let i = 0; i < row2.length; i++) {
+        const p = row2[i];
+        const cx = row2.length === 1 ? width / 2 : row2StartX + i * layout2.spacing;
+        await drawPlayerAvatar(ctx, p, cx, row2Y, cfg, { ...opts.avatarOpts(p), nameMaxWidth: row2NameWidth });
+      }
+
+      return { rows: 2, yEnd: row2Y };
+    };
+
+    await drawPlayerRows(winners, WB.winners, WB.winners.avatarY, {
+      margin: 100,
+      minSpacing: 90,
+      avatarOpts: (p) => ({
         borderColor: accentColor,
         dimmed: false,
-        accentColor: p.alive ? accentColor : 'rgba(200,200,200,0.5)',
+        accentColor: p.alive ? accentColor : 'rgba(200,200,200,0.55)',
         roleIconImg: roleIcons[p.role] || null,
-      });
+      }),
+    });
 
-      if (i % 2 === 1) await new Promise(r => setImmediate(r));
-    }
+    const winnerSectionShift = winnersMultiRow ? (WB.winners.rowGap || 220) - 35 : 0;
 
-    // 12. Divider before losers
-    const loserDivY = WB.losers.labelY - 25;
+    // 11. Divider before losers
+    const losersLabelY = WB.losers.labelY + winnerSectionShift;
+    const loserDivY = losersLabelY - 25;
     drawDivider(ctx, loserDivY, width, 0.2);
 
-    // 13. Losers label
-    drawGlowText(ctx, 'الخاسرون', width / 2, WB.losers.labelY, {
+    // 12. Losers label
+    drawGlowText(ctx, 'الخاسرون', width / 2, losersLabelY, {
       font: `700 ${WB.losers.labelFontSize}px ${CFG.fonts.label}`,
       color: 'rgba(255,255,255,0.45)',
-      glowBlur: 8,
+      glowBlur: 2.5,
       glowColor: 'rgba(0,0,0,0.6)',
     });
 
-    // 14. Draw loser avatars in horizontal row (greyscale + dimmed)
-    const lMargin = 120;
-    const lLayout = calcSpacing(losers.length, WB.losers.avatarSpacing, 70, width - lMargin * 2);
-    const lStartX = (width / 2) - lLayout.totalWidth / 2;
-
-    for (let i = 0; i < losers.length; i++) {
-      const p = losers[i];
-      const cx = lStartX + i * lLayout.spacing;
-      const cy = WB.losers.avatarY;
-
-      await drawPlayerAvatar(ctx, p, cx, cy, WB.losers, {
-        borderColor: 'rgba(150,150,150,0.4)',
+    // 13. Loser avatars (single/multi row)
+    const losersStartY = WB.losers.avatarY + winnerSectionShift;
+    await drawPlayerRows(losers, WB.losers, losersStartY, {
+      margin: 120,
+      minSpacing: 70,
+      avatarOpts: (p) => ({
+        borderColor: 'rgba(150,150,150,0.45)',
         dimmed: true,
         roleIconImg: roleIcons[p.role] || null,
-      });
+      }),
+    });
 
-      if (i % 2 === 1) await new Promise(r => setImmediate(r));
-    }
-
-    // 15. Round count (no emoji)
-    drawGlowText(ctx, `عدد الجولات: ${roundsPlayed}`, width / 2, WB.footer.y, {
+    // 14. Round count
+    const footerShift = winnerSectionShift + (losersMultiRow ? (WB.losers.rowGap || 170) - 40 : 0);
+    const footerY = Math.min(WB.footer.y + footerShift, height - 40);
+    drawGlowText(ctx, `عدد الجولات: ${roundsPlayed}`, width / 2, footerY, {
       font: `700 ${WB.footer.fontSize}px ${CFG.fonts.label}`,
       color: 'rgba(255,255,255,0.7)',
-      glowBlur: 8,
+      glowBlur: 2.5,
       glowColor: 'rgba(0,0,0,0.6)',
     });
 
-    // 16. Bottom accent bar
+    // 15. Bottom accent bar
     drawAccentBar(ctx, height - WB.accentBarHeight, width, WB.accentBarHeight, accentGlow);
 
-    // 17. Downsample and export
+    // 16. Downsample and export
     const finalCanvas = downsampleCanvas(renderCanvas, width, height);
     return finalCanvas.toBuffer('image/png');
 
