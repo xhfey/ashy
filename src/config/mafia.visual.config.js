@@ -135,9 +135,10 @@ export const MAFIA_VISUAL_CONFIG = {
     fontSize: 42,
   },
 
+  // Fizbo-style overlay (darker for better text readability)
   overlayAlpha: {
-    teams: 0.12,
-    win: 0.14,
+    teams: 0.40,   // Darker overlay like Fizbo
+    win: 0.42,     // Darker overlay like Fizbo
   },
 
   // ==================== WIN BANNER ====================

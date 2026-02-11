@@ -163,7 +163,8 @@ async function loadRoleIcons() {
 // ==================== DRAWING HELPERS ====================
 
 /**
- * Draw text with glow/shadow effect
+ * Draw text with Fizbo-style subtle shadow (no thick strokes)
+ * Fizbo uses: clean text + soft shadow, NO heavy outlines
  */
 function drawGlowText(ctx, text, x, y, options = {}) {
   const {
@@ -171,10 +172,10 @@ function drawGlowText(ctx, text, x, y, options = {}) {
     color = '#FFFFFF',
     align = 'center',
     baseline = 'middle',
-    glowColor = 'rgba(0,0,0,0.65)',
-    glowBlur = 5,
-    outlineColor = 'rgba(0,0,0,0.5)',
-    outlineWidth = 0.8,
+    glowColor = 'rgba(0,0,0,0.75)',
+    glowBlur = 4,
+    outlineColor = null,  // Fizbo doesn't use outlines by default
+    outlineWidth = 0,
   } = options;
 
   ctx.save();
@@ -182,17 +183,19 @@ function drawGlowText(ctx, text, x, y, options = {}) {
   ctx.textAlign = align;
   ctx.textBaseline = baseline;
 
+  // Subtle shadow (Fizbo style)
   if (glowBlur > 0) {
     ctx.shadowColor = glowColor;
     ctx.shadowBlur = glowBlur;
     ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
+    ctx.shadowOffsetY = 2;
   }
 
   ctx.fillStyle = color;
   ctx.fillText(text, x, y);
 
-  if (outlineWidth > 0) {
+  // Only stroke if explicitly requested (rare in Fizbo)
+  if (outlineWidth > 0 && outlineColor) {
     ctx.shadowBlur = 0;
     ctx.lineWidth = outlineWidth;
     ctx.strokeStyle = outlineColor;
@@ -204,11 +207,25 @@ function drawGlowText(ctx, text, x, y, options = {}) {
 
 /**
  * Draw an image inside a circular clip (center-cropped to square)
+ * Fizbo style: NO border ring, only shadow for depth
  */
 function drawCircularIcon(ctx, img, cx, cy, size, borderWidth) {
   const radius = size / 2;
-  ctx.save();
 
+  // Draw shadow BEFORE clipping
+  ctx.save();
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
+  ctx.shadowBlur = 8;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 3;
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.fillStyle = '#000';
+  ctx.fill();
+  ctx.restore();
+
+  // Draw image with circular clip
+  ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
   ctx.closePath();
@@ -221,14 +238,7 @@ function drawCircularIcon(ctx, img, cx, cy, size, borderWidth) {
   ctx.drawImage(img, sx, sy, srcSize, srcSize, cx - radius, cy - radius, size, size);
   ctx.restore();
 
-  // Border ring
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.lineWidth = borderWidth || CFG.icons.borderWidth || 2;
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
-  ctx.stroke();
-  ctx.restore();
+  // NO border ring (Fizbo style)
 }
 
 /**
@@ -312,7 +322,8 @@ function drawAccentBar(ctx, y, width, height, glowColor) {
 }
 
 /**
- * Draw background (image or gradient fallback) + overlay
+ * Draw background (image or gradient fallback) + Fizbo-style overlay
+ * Fizbo uses: dark gradient (darker at edges) + vignette for premium readability
  */
 async function drawBackground(ctx, width, height, overlayAlpha = 0.3) {
   const bgImg = await loadCachedImage(CFG.assets.background);
@@ -325,7 +336,21 @@ async function drawBackground(ctx, width, height, overlayAlpha = 0.3) {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
   }
-  ctx.fillStyle = `rgba(0, 0, 0, ${overlayAlpha})`;
+
+  // Fizbo-style gradient overlay (darker at top/bottom, lighter in middle)
+  const overlayGrad = ctx.createLinearGradient(0, 0, 0, height);
+  overlayGrad.addColorStop(0, `rgba(0, 0, 0, ${overlayAlpha * 1.8})`);    // Darker at top
+  overlayGrad.addColorStop(0.45, `rgba(0, 0, 0, ${overlayAlpha * 0.65})`); // Lighter in middle
+  overlayGrad.addColorStop(1, `rgba(0, 0, 0, ${overlayAlpha * 1.9})`);    // Darker at bottom
+  ctx.fillStyle = overlayGrad;
+  ctx.fillRect(0, 0, width, height);
+
+  // Vignette effect (darker at edges, radial)
+  const vignetteGrad = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.max(width, height) * 0.85);
+  vignetteGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+  vignetteGrad.addColorStop(0.7, 'rgba(0, 0, 0, 0.25)');
+  vignetteGrad.addColorStop(1, 'rgba(0, 0, 0, 0.5)');
+  ctx.fillStyle = vignetteGrad;
   ctx.fillRect(0, 0, width, height);
 }
 
@@ -354,12 +379,13 @@ function drawRoleIcon(ctx, cx, cy, roleKey, iconImg, iconSize) {
     drawDetectiveFallback(ctx, cx, cy, iconSize);
   }
 
+  // Fizbo style: clean role text with subtle shadow
   const name = ROLE_NAMES[roleKey] || roleKey;
   drawGlowText(ctx, name, cx, cy + CFG.roleText.offsetY, {
     font: `700 ${CFG.roleText.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`,
     color: CFG.colors.roleText,
     glowBlur: 3,
-    glowColor: 'rgba(0,0,0,0.8)',
+    glowColor: 'rgba(0, 0, 0, 0.85)',
   });
 }
 
@@ -585,14 +611,8 @@ async function drawPlayerAvatar(ctx, player, cx, cy, cfg, options = {}) {
     }
   }
 
-  // Border ring (colored for winners, grey for losers)
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.lineWidth = cfg.borderWidth;
-  ctx.strokeStyle = dimmed ? 'rgba(150, 150, 150, 0.4)' : (accentColor || borderColor);
-  ctx.stroke();
-  ctx.restore();
+  // Fizbo style: NO border ring, only subtle shadow (already drawn by drawCircularIcon)
+  // (Border rings removed for clean look)
 
   // Death badge for dead winners
   if (!dimmed && !player.alive) {
@@ -622,12 +642,12 @@ async function drawPlayerAvatar(ctx, player, cx, cy, cfg, options = {}) {
     maxWidth: maxNameWidth,
   });
 
+  // Fizbo style: clean player names, NO outlines
   drawGlowText(ctx, safeName, cx, nameY, {
     font: `700 ${fittedSize}px ${CFG.fonts.small || CFG.fonts.body || CFG.fonts.label}`,
     color: nameColor,
-    glowBlur: dimmed ? 1.5 : 2.2,
-    glowColor: 'rgba(0,0,0,0.8)',
-    outlineWidth: dimmed ? 0.5 : 0.7,
+    glowBlur: dimmed ? 2 : 3,
+    glowColor: 'rgba(0, 0, 0, 0.85)',
   });
 }
 
@@ -685,22 +705,19 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
     // 2. Team labels
     const labelFont = `700 ${CFG.teamLabels.fontSize}px ${CFG.fonts.label}`;
 
+    // Fizbo style: clean text, subtle shadow, NO outlines
     drawGlowText(ctx, 'الفريق الثاني', CFG.teamLabels.team2.x, CFG.teamLabels.team2.y, {
       font: labelFont,
       color: CFG.colors.team2,
-      glowColor: CFG.colors.team2Glow || 'rgba(239,68,68,0.45)',
-      glowBlur: 6,
-      outlineWidth: 0.8,
-      outlineColor: 'rgba(0,0,0,0.32)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
+      glowBlur: 4,
     });
 
     drawGlowText(ctx, 'الفريق الاول', CFG.teamLabels.team1.x, CFG.teamLabels.team1.y, {
       font: labelFont,
       color: CFG.colors.team1,
-      glowColor: CFG.colors.team1Glow || 'rgba(74,222,128,0.45)',
-      glowBlur: 6,
-      outlineWidth: 0.8,
-      outlineColor: 'rgba(0,0,0,0.32)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
+      glowBlur: 4,
     });
 
     // 3. Load role icons
@@ -739,24 +756,24 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
     const objFont = `700 ${CFG.objectives.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`;
     const dotR = 7;
 
-    // Team 1 objective (right side)
+    // Team 1 objective (right side) - Fizbo style
     const obj1X = CFG.objectives.team1.x;
     drawColoredDot(ctx, obj1X - 180, objY, dotR, CFG.colors.team1);
     drawGlowText(ctx, 'الهدف : كشف المافيا قبل ما ينقتلون', obj1X, objY, {
       font: objFont,
       color: CFG.colors.team1,
       glowBlur: 3,
-      glowColor: 'rgba(60, 255, 107, 0.4)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
     });
 
-    // Team 2 objective (left side)
+    // Team 2 objective (left side) - Fizbo style
     const obj2X = CFG.objectives.team2.x;
     drawColoredDot(ctx, obj2X - 180, objY, dotR, CFG.colors.team2);
     drawGlowText(ctx, 'الهدف : اغتيال جميع اعضاء الشعب', obj2X, objY, {
       font: objFont,
       color: CFG.colors.team2,
       glowBlur: 3,
-      glowColor: 'rgba(255, 60, 60, 0.4)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
     });
 
     // 7. Downsample and export
@@ -820,23 +837,20 @@ export async function generateWinBanner(winningTeam, players, roundsPlayed) {
     // 4. Canvas-drawn trophy (no emoji)
     drawCanvasTrophy(ctx, width / 2, WB.trophy.y, WB.trophy.size);
 
-    // 5. Title
+    // 5. Title - Fizbo style (clean, no outlines)
     drawGlowText(ctx, `فاز ${teamName}`, width / 2, WB.title.y, {
       font: `700 ${WB.title.fontSize}px ${CFG.fonts.title || CFG.fonts.label}`,
       color: accentColor,
-      glowColor: accentGlow,
-      glowBlur: 7,
-      outlineWidth: 0.9,
-      outlineColor: 'rgba(0,0,0,0.35)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
+      glowBlur: 5,
     });
 
-    // 6. Subtitle
+    // 6. Subtitle - Fizbo style
     drawGlowText(ctx, `( ${teamSubtitle} )`, width / 2, WB.title.subtitleY, {
       font: `700 ${WB.title.subtitleFontSize}px ${CFG.fonts.label}`,
       color: accentColor,
-      glowColor: accentGlow,
+      glowColor: 'rgba(0, 0, 0, 0.8)',
       glowBlur: 4,
-      outlineWidth: 0.6,
     });
 
     // 7. Divider

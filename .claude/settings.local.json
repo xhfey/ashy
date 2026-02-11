@@ -8,7 +8,8 @@
       "Bash(xargs:*)",
       "Bash(dir:*)",
       "Bash(node:*)",
-      "Bash(npm test:*)"
+      "Bash(npm test:*)",
+      "Bash(npm rebuild:*)"
     ]
   }
 }
