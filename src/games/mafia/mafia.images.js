@@ -388,7 +388,11 @@ function drawRoleRows(ctx, roles, roleIcons, options = {}) {
     rowGap,
   } = options;
 
-  if (roles.length <= maxPerRow) {
+  // ENFORCE maxPerRow limit strictly (Fizbo style: max 4 per row)
+  const actualMaxPerRow = maxPerRow || 4;
+
+  if (roles.length <= actualMaxPerRow) {
+    // Single row
     const layout = calcSpacing(roles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
     const startX = centerX - layout.totalWidth / 2;
     for (let i = 0; i < roles.length; i++) {
@@ -398,23 +402,23 @@ function drawRoleRows(ctx, roles, roleIcons, options = {}) {
     return;
   }
 
-  const row1Count = Math.ceil(roles.length / 2);
-  const row1 = roles.slice(0, row1Count);
-  const row2 = roles.slice(row1Count);
+  // Multiple rows - split into chunks of maxPerRow
+  const numRows = Math.ceil(roles.length / actualMaxPerRow);
+  const iconsPerRow = Math.ceil(roles.length / numRows);
 
-  const layout1 = calcSpacing(row1.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
-  const row1StartX = centerX - layout1.totalWidth / 2;
-  for (let i = 0; i < row1.length; i++) {
-    const cx = row1.length === 1 ? centerX : row1StartX + i * layout1.spacing;
-    drawRoleIcon(ctx, cx, startY, row1[i], roleIcons[row1[i]], iconSize);
-  }
+  for (let rowIndex = 0; rowIndex < numRows; rowIndex++) {
+    const startIdx = rowIndex * iconsPerRow;
+    const endIdx = Math.min(startIdx + iconsPerRow, roles.length);
+    const rowRoles = roles.slice(startIdx, endIdx);
+    const rowY = startY + (rowIndex * rowGap);
 
-  const row2Y = startY + rowGap;
-  const layout2 = calcSpacing(row2.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
-  const row2StartX = centerX - layout2.totalWidth / 2;
-  for (let i = 0; i < row2.length; i++) {
-    const cx = row2.length === 1 ? centerX : row2StartX + i * layout2.spacing;
-    drawRoleIcon(ctx, cx, row2Y, row2[i], roleIcons[row2[i]], iconSize);
+    const layout = calcSpacing(rowRoles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
+    const rowStartX = centerX - layout.totalWidth / 2;
+
+    for (let i = 0; i < rowRoles.length; i++) {
+      const cx = rowRoles.length === 1 ? centerX : rowStartX + i * layout.spacing;
+      drawRoleIcon(ctx, cx, rowY, rowRoles[i], roleIcons[rowRoles[i]], iconSize);
+    }
   }
 }
 
@@ -734,30 +738,38 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
       rowGap,
     });
 
-    // 6. Team objectives at bottom corners (Fizbo style)
+    // 6. Team objectives at bottom corners (Fizbo style with proper RTL dot placement)
     const objY = needsMultiRow ? height - 72 : CFG.objectives.y;
     const objFont = `700 ${CFG.objectives.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`;
     const dotR = 7;
+    const dotGap = 18;
 
-    // Team 1 objective (right side)
+    // Team 1 objective (right side, RTL) - dot goes to the RIGHT of text
+    const obj1Text = 'الهدف : كشف المافيا قبل ما ينقتلون';
     const obj1X = CFG.objectives.team1.x;
-    drawColoredDot(ctx, obj1X - 180, objY, dotR, CFG.colors.team1);
-    drawGlowText(ctx, 'الهدف : كشف المافيا قبل ما ينقتلون', obj1X, objY, {
+    ctx.font = objFont;
+    const obj1Width = ctx.measureText(obj1Text).width;
+    drawGlowText(ctx, obj1Text, obj1X, objY, {
       font: objFont,
       color: CFG.colors.team1,
       glowBlur: 3,
-      glowColor: 'rgba(60, 255, 107, 0.4)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
+      align: 'right',
     });
+    drawColoredDot(ctx, obj1X + dotGap, objY, dotR, CFG.colors.team1);
 
-    // Team 2 objective (left side)
+    // Team 2 objective (left side, RTL) - dot goes to the RIGHT of text
+    const obj2Text = 'الهدف : اغتيال جميع اعضاء الشعب';
     const obj2X = CFG.objectives.team2.x;
-    drawColoredDot(ctx, obj2X - 180, objY, dotR, CFG.colors.team2);
-    drawGlowText(ctx, 'الهدف : اغتيال جميع اعضاء الشعب', obj2X, objY, {
+    const obj2Width = ctx.measureText(obj2Text).width;
+    drawGlowText(ctx, obj2Text, obj2X, objY, {
       font: objFont,
       color: CFG.colors.team2,
       glowBlur: 3,
-      glowColor: 'rgba(255, 60, 60, 0.4)',
+      glowColor: 'rgba(0, 0, 0, 0.8)',
+      align: 'left',
     });
+    drawColoredDot(ctx, obj2X + obj2Width + dotGap, objY, dotR, CFG.colors.team2);
 
     // 7. Downsample and export
     const finalCanvas = downsampleCanvas(renderCanvas, width, height);
