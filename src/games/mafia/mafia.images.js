@@ -163,8 +163,7 @@ async function loadRoleIcons() {
 // ==================== DRAWING HELPERS ====================
 
 /**
- * Draw text with Fizbo-style subtle shadow (no thick strokes)
- * Fizbo uses: clean text + soft shadow, NO heavy outlines
+ * Draw text with glow/shadow effect
  */
 function drawGlowText(ctx, text, x, y, options = {}) {
   const {
@@ -172,10 +171,10 @@ function drawGlowText(ctx, text, x, y, options = {}) {
     color = '#FFFFFF',
     align = 'center',
     baseline = 'middle',
-    glowColor = 'rgba(0,0,0,0.75)',
-    glowBlur = 4,
-    outlineColor = null,  // Fizbo doesn't use outlines by default
-    outlineWidth = 0,
+    glowColor = 'rgba(0,0,0,0.65)',
+    glowBlur = 5,
+    outlineColor = 'rgba(0,0,0,0.5)',
+    outlineWidth = 0.8,
   } = options;
 
   ctx.save();
@@ -183,19 +182,17 @@ function drawGlowText(ctx, text, x, y, options = {}) {
   ctx.textAlign = align;
   ctx.textBaseline = baseline;
 
-  // Subtle shadow (Fizbo style)
   if (glowBlur > 0) {
     ctx.shadowColor = glowColor;
     ctx.shadowBlur = glowBlur;
     ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 2;
+    ctx.shadowOffsetY = 0;
   }
 
   ctx.fillStyle = color;
   ctx.fillText(text, x, y);
 
-  // Only stroke if explicitly requested (rare in Fizbo)
-  if (outlineWidth > 0 && outlineColor) {
+  if (outlineWidth > 0) {
     ctx.shadowBlur = 0;
     ctx.lineWidth = outlineWidth;
     ctx.strokeStyle = outlineColor;
@@ -207,25 +204,11 @@ function drawGlowText(ctx, text, x, y, options = {}) {
 
 /**
  * Draw an image inside a circular clip (center-cropped to square)
- * Fizbo style: NO border ring, only shadow for depth
  */
 function drawCircularIcon(ctx, img, cx, cy, size, borderWidth) {
   const radius = size / 2;
-
-  // Draw shadow BEFORE clipping
   ctx.save();
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
-  ctx.shadowBlur = 8;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 3;
-  ctx.beginPath();
-  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-  ctx.fillStyle = '#000';
-  ctx.fill();
-  ctx.restore();
 
-  // Draw image with circular clip
-  ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI * 2);
   ctx.closePath();
@@ -238,7 +221,14 @@ function drawCircularIcon(ctx, img, cx, cy, size, borderWidth) {
   ctx.drawImage(img, sx, sy, srcSize, srcSize, cx - radius, cy - radius, size, size);
   ctx.restore();
 
-  // NO border ring (Fizbo style)
+  // Border ring
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.lineWidth = borderWidth || CFG.icons.borderWidth || 2;
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.25)';
+  ctx.stroke();
+  ctx.restore();
 }
 
 /**
@@ -322,8 +312,7 @@ function drawAccentBar(ctx, y, width, height, glowColor) {
 }
 
 /**
- * Draw background (image or gradient fallback) + Fizbo-style overlay
- * Fizbo uses: dark gradient (darker at edges) + vignette for premium readability
+ * Draw background (image or gradient fallback) + overlay
  */
 async function drawBackground(ctx, width, height, overlayAlpha = 0.3) {
   const bgImg = await loadCachedImage(CFG.assets.background);
@@ -336,21 +325,7 @@ async function drawBackground(ctx, width, height, overlayAlpha = 0.3) {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
   }
-
-  // Fizbo-style gradient overlay (darker at top/bottom, lighter in middle)
-  const overlayGrad = ctx.createLinearGradient(0, 0, 0, height);
-  overlayGrad.addColorStop(0, `rgba(0, 0, 0, ${overlayAlpha * 1.8})`);    // Darker at top
-  overlayGrad.addColorStop(0.45, `rgba(0, 0, 0, ${overlayAlpha * 0.65})`); // Lighter in middle
-  overlayGrad.addColorStop(1, `rgba(0, 0, 0, ${overlayAlpha * 1.9})`);    // Darker at bottom
-  ctx.fillStyle = overlayGrad;
-  ctx.fillRect(0, 0, width, height);
-
-  // Vignette effect (darker at edges, radial)
-  const vignetteGrad = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.max(width, height) * 0.85);
-  vignetteGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
-  vignetteGrad.addColorStop(0.7, 'rgba(0, 0, 0, 0.25)');
-  vignetteGrad.addColorStop(1, 'rgba(0, 0, 0, 0.5)');
-  ctx.fillStyle = vignetteGrad;
+  ctx.fillStyle = `rgba(0, 0, 0, ${overlayAlpha})`;
   ctx.fillRect(0, 0, width, height);
 }
 
@@ -379,13 +354,12 @@ function drawRoleIcon(ctx, cx, cy, roleKey, iconImg, iconSize) {
     drawDetectiveFallback(ctx, cx, cy, iconSize);
   }
 
-  // Fizbo style: clean role text with subtle shadow
   const name = ROLE_NAMES[roleKey] || roleKey;
   drawGlowText(ctx, name, cx, cy + CFG.roleText.offsetY, {
     font: `700 ${CFG.roleText.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`,
     color: CFG.colors.roleText,
     glowBlur: 3,
-    glowColor: 'rgba(0, 0, 0, 0.85)',
+    glowColor: 'rgba(0,0,0,0.8)',
   });
 }
 
@@ -414,7 +388,11 @@ function drawRoleRows(ctx, roles, roleIcons, options = {}) {
     rowGap,
   } = options;
 
-  if (roles.length <= maxPerRow) {
+  // ENFORCE maxPerRow limit strictly (Fizbo style: max 4 per row)
+  const actualMaxPerRow = maxPerRow || 4;
+
+  if (roles.length <= actualMaxPerRow) {
+    // Single row
     const layout = calcSpacing(roles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
     const startX = centerX - layout.totalWidth / 2;
     for (let i = 0; i < roles.length; i++) {
@@ -424,23 +402,23 @@ function drawRoleRows(ctx, roles, roleIcons, options = {}) {
     return;
   }
 
-  const row1Count = Math.ceil(roles.length / 2);
-  const row1 = roles.slice(0, row1Count);
-  const row2 = roles.slice(row1Count);
+  // Multiple rows - split into chunks of maxPerRow
+  const numRows = Math.ceil(roles.length / actualMaxPerRow);
+  const iconsPerRow = Math.ceil(roles.length / numRows);
 
-  const layout1 = calcSpacing(row1.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
-  const row1StartX = centerX - layout1.totalWidth / 2;
-  for (let i = 0; i < row1.length; i++) {
-    const cx = row1.length === 1 ? centerX : row1StartX + i * layout1.spacing;
-    drawRoleIcon(ctx, cx, startY, row1[i], roleIcons[row1[i]], iconSize);
-  }
+  for (let rowIndex = 0; rowIndex < numRows; rowIndex++) {
+    const startIdx = rowIndex * iconsPerRow;
+    const endIdx = Math.min(startIdx + iconsPerRow, roles.length);
+    const rowRoles = roles.slice(startIdx, endIdx);
+    const rowY = startY + (rowIndex * rowGap);
 
-  const row2Y = startY + rowGap;
-  const layout2 = calcSpacing(row2.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
-  const row2StartX = centerX - layout2.totalWidth / 2;
-  for (let i = 0; i < row2.length; i++) {
-    const cx = row2.length === 1 ? centerX : row2StartX + i * layout2.spacing;
-    drawRoleIcon(ctx, cx, row2Y, row2[i], roleIcons[row2[i]], iconSize);
+    const layout = calcSpacing(rowRoles.length, CFG.icons.spacingX, CFG.icons.minSpacingX, availableWidth);
+    const rowStartX = centerX - layout.totalWidth / 2;
+
+    for (let i = 0; i < rowRoles.length; i++) {
+      const cx = rowRoles.length === 1 ? centerX : rowStartX + i * layout.spacing;
+      drawRoleIcon(ctx, cx, rowY, rowRoles[i], roleIcons[rowRoles[i]], iconSize);
+    }
   }
 }
 
@@ -611,8 +589,14 @@ async function drawPlayerAvatar(ctx, player, cx, cy, cfg, options = {}) {
     }
   }
 
-  // Fizbo style: NO border ring, only subtle shadow (already drawn by drawCircularIcon)
-  // (Border rings removed for clean look)
+  // Border ring (colored for winners, grey for losers)
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+  ctx.lineWidth = cfg.borderWidth;
+  ctx.strokeStyle = dimmed ? 'rgba(150, 150, 150, 0.4)' : (accentColor || borderColor);
+  ctx.stroke();
+  ctx.restore();
 
   // Death badge for dead winners
   if (!dimmed && !player.alive) {
@@ -642,12 +626,12 @@ async function drawPlayerAvatar(ctx, player, cx, cy, cfg, options = {}) {
     maxWidth: maxNameWidth,
   });
 
-  // Fizbo style: clean player names, NO outlines
   drawGlowText(ctx, safeName, cx, nameY, {
     font: `700 ${fittedSize}px ${CFG.fonts.small || CFG.fonts.body || CFG.fonts.label}`,
     color: nameColor,
-    glowBlur: dimmed ? 2 : 3,
-    glowColor: 'rgba(0, 0, 0, 0.85)',
+    glowBlur: dimmed ? 1.5 : 2.2,
+    glowColor: 'rgba(0,0,0,0.8)',
+    outlineWidth: dimmed ? 0.5 : 0.7,
   });
 }
 
@@ -705,19 +689,22 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
     // 2. Team labels
     const labelFont = `700 ${CFG.teamLabels.fontSize}px ${CFG.fonts.label}`;
 
-    // Fizbo style: clean text, subtle shadow, NO outlines
     drawGlowText(ctx, 'الفريق الثاني', CFG.teamLabels.team2.x, CFG.teamLabels.team2.y, {
       font: labelFont,
       color: CFG.colors.team2,
-      glowColor: 'rgba(0, 0, 0, 0.8)',
-      glowBlur: 4,
+      glowColor: CFG.colors.team2Glow || 'rgba(239,68,68,0.45)',
+      glowBlur: 6,
+      outlineWidth: 0.8,
+      outlineColor: 'rgba(0,0,0,0.32)',
     });
 
     drawGlowText(ctx, 'الفريق الاول', CFG.teamLabels.team1.x, CFG.teamLabels.team1.y, {
       font: labelFont,
       color: CFG.colors.team1,
-      glowColor: 'rgba(0, 0, 0, 0.8)',
-      glowBlur: 4,
+      glowColor: CFG.colors.team1Glow || 'rgba(74,222,128,0.45)',
+      glowBlur: 6,
+      outlineWidth: 0.8,
+      outlineColor: 'rgba(0,0,0,0.32)',
     });
 
     // 3. Load role icons
@@ -751,30 +738,38 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
       rowGap,
     });
 
-    // 6. Team objectives at bottom corners (Fizbo style)
+    // 6. Team objectives at bottom corners (Fizbo style with proper RTL dot placement)
     const objY = needsMultiRow ? height - 72 : CFG.objectives.y;
     const objFont = `700 ${CFG.objectives.fontSize}px ${CFG.fonts.body || CFG.fonts.label}`;
     const dotR = 7;
+    const dotGap = 18;
 
-    // Team 1 objective (right side) - Fizbo style
+    // Team 1 objective (right side, RTL) - dot goes to the RIGHT of text
+    const obj1Text = 'الهدف : كشف المافيا قبل ما ينقتلون';
     const obj1X = CFG.objectives.team1.x;
-    drawColoredDot(ctx, obj1X - 180, objY, dotR, CFG.colors.team1);
-    drawGlowText(ctx, 'الهدف : كشف المافيا قبل ما ينقتلون', obj1X, objY, {
+    ctx.font = objFont;
+    const obj1Width = ctx.measureText(obj1Text).width;
+    drawGlowText(ctx, obj1Text, obj1X, objY, {
       font: objFont,
       color: CFG.colors.team1,
       glowBlur: 3,
       glowColor: 'rgba(0, 0, 0, 0.8)',
+      align: 'right',
     });
+    drawColoredDot(ctx, obj1X + dotGap, objY, dotR, CFG.colors.team1);
 
-    // Team 2 objective (left side) - Fizbo style
+    // Team 2 objective (left side, RTL) - dot goes to the RIGHT of text
+    const obj2Text = 'الهدف : اغتيال جميع اعضاء الشعب';
     const obj2X = CFG.objectives.team2.x;
-    drawColoredDot(ctx, obj2X - 180, objY, dotR, CFG.colors.team2);
-    drawGlowText(ctx, 'الهدف : اغتيال جميع اعضاء الشعب', obj2X, objY, {
+    const obj2Width = ctx.measureText(obj2Text).width;
+    drawGlowText(ctx, obj2Text, obj2X, objY, {
       font: objFont,
       color: CFG.colors.team2,
       glowBlur: 3,
       glowColor: 'rgba(0, 0, 0, 0.8)',
+      align: 'left',
     });
+    drawColoredDot(ctx, obj2X + obj2Width + dotGap, objY, dotR, CFG.colors.team2);
 
     // 7. Downsample and export
     const finalCanvas = downsampleCanvas(renderCanvas, width, height);
@@ -837,20 +832,23 @@ export async function generateWinBanner(winningTeam, players, roundsPlayed) {
     // 4. Canvas-drawn trophy (no emoji)
     drawCanvasTrophy(ctx, width / 2, WB.trophy.y, WB.trophy.size);
 
-    // 5. Title - Fizbo style (clean, no outlines)
+    // 5. Title
     drawGlowText(ctx, `فاز ${teamName}`, width / 2, WB.title.y, {
       font: `700 ${WB.title.fontSize}px ${CFG.fonts.title || CFG.fonts.label}`,
       color: accentColor,
-      glowColor: 'rgba(0, 0, 0, 0.8)',
-      glowBlur: 5,
+      glowColor: accentGlow,
+      glowBlur: 7,
+      outlineWidth: 0.9,
+      outlineColor: 'rgba(0,0,0,0.35)',
     });
 
-    // 6. Subtitle - Fizbo style
+    // 6. Subtitle
     drawGlowText(ctx, `( ${teamSubtitle} )`, width / 2, WB.title.subtitleY, {
       font: `700 ${WB.title.subtitleFontSize}px ${CFG.fonts.label}`,
       color: accentColor,
-      glowColor: 'rgba(0, 0, 0, 0.8)',
+      glowColor: accentGlow,
       glowBlur: 4,
+      outlineWidth: 0.6,
     });
 
     // 7. Divider
