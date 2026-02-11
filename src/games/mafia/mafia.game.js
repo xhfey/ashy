@@ -51,7 +51,7 @@ async function withLock(sessionId, fn) {
     throw error;
   });
 
-  const queued = swallowed.catch(() => {});
+  const queued = swallowed.catch(() => { });
   sessionLocks.set(sessionId, queued);
 
   try {
@@ -225,14 +225,24 @@ async function runRound(gs, session) {
     await runNightMafia(gs, session);
     if (gs.state === 'ENDED') break;
 
-    await runNightDoctor(gs, session);
-    if (gs.state === 'ENDED') break;
+    // Doctor only if doctor exists and is alive
+    const doctorId = findPlayerByRole(gs, ROLES.DOCTOR);
+    if (doctorId && gs.players[doctorId].alive) {
+      await runNightDoctor(gs, session);
+      if (gs.state === 'ENDED') break;
+    } else if (doctorId) {
+      // Doctor is dead, skip phase with notification
+      await gs.channel.send({ content: '💀 تم تخطي مرحلة الطبيب (الطبيب ميت)' });
+    }
 
     // Detective only if enabled AND alive
     const detectiveId = findPlayerByRole(gs, ROLES.DETECTIVE);
     if (gs.detectiveEnabled && detectiveId && gs.players[detectiveId].alive) {
       await runNightDetective(gs, session);
       if (gs.state === 'ENDED') break;
+    } else if (gs.detectiveEnabled && detectiveId) {
+      // Detective is dead, skip phase with notification
+      await gs.channel.send({ content: '💀 تم تخطي مرحلة المحقق (المحقق ميت)' });
     }
 
     // Resolve night
@@ -713,14 +723,14 @@ async function handleMafiaVote(ctx, gs, targetId) {
   // Validate target is alive and non-mafia
   const target = gs.players[targetId];
   if (!target || !target.alive || target.role === ROLES.MAFIA) {
-    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+    return interaction.followUp({ content: MESSAGES.INVALID_TARGET, ephemeral: true });
   }
 
   gs.mafiaVotes.set(userId, targetId);
   const targets = getAliveNonMafia(gs);
   const pickMention = `<@${targetId}>`;
 
-  return interaction.editReply({
+  return interaction.update({
     content: `${MESSAGES.MAFIA_ACTION_TITLE}\n${MESSAGES.MAFIA_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.MAFIA_VOTE),
   });
@@ -747,17 +757,17 @@ async function handleDoctorProtect(ctx, gs, targetId) {
   // Validate target is alive and not the same as last round
   const target = gs.players[targetId];
   if (!target || !target.alive) {
-    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+    return interaction.followUp({ content: MESSAGES.INVALID_TARGET, ephemeral: true });
   }
   if (targetId === gs.lastDoctorProtectedUserId) {
-    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+    return interaction.followUp({ content: MESSAGES.CANNOT_PROTECT_SAME_TWICE, ephemeral: true });
   }
 
   gs.doctorProtectUserId = targetId;
   const targets = getAlivePlayers(gs).filter(p => p.userId !== gs.lastDoctorProtectedUserId);
   const pickMention = `<@${targetId}>`;
 
-  return interaction.editReply({
+  return interaction.update({
     content: `${MESSAGES.DOCTOR_ACTION_TITLE}\n${MESSAGES.DOCTOR_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DOCTOR_PROTECT),
   });
@@ -783,7 +793,7 @@ async function handleDetectiveCheck(ctx, gs, targetId) {
 
   const target = gs.players[targetId];
   if (!target || !target.alive || targetId === userId) {
-    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+    return interaction.followUp({ content: MESSAGES.INVALID_TARGET, ephemeral: true });
   }
 
   gs.detectiveInvestigateUserId = targetId;
@@ -793,7 +803,7 @@ async function handleDetectiveCheck(ctx, gs, targetId) {
   const targets = getAlivePlayers(gs).filter(p => p.userId !== userId);
   const pickMention = `<@${targetId}>`;
 
-  return interaction.editReply({
+  return interaction.update({
     content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}\n${MESSAGES.DETECTIVE_LAST_RESULT(gs.detectiveLastResultText)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DETECTIVE_CHECK),
   });
@@ -816,7 +826,7 @@ async function handleDayVote(ctx, gs, targetId) {
 
   const target = gs.players[targetId];
   if (!target || !target.alive) {
-    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+    return interaction.followUp({ content: MESSAGES.INVALID_TARGET, ephemeral: true });
   }
 
   gs.dayVotes.set(userId, targetId);
@@ -861,6 +871,20 @@ async function handleHintPurchase(ctx, gs) {
     return interaction.followUp({ content: MESSAGES.HINT_ALREADY_USED, ephemeral: true });
   }
 
+  // Check balance upfront (BUG-012 fix)
+  try {
+    const balance = await CurrencyService.getBalance(userId);
+    if (balance < HINT_COST) {
+      return interaction.followUp({
+        content: MESSAGES.HINT_NO_BALANCE(HINT_COST, balance),
+        ephemeral: true,
+      });
+    }
+  } catch (error) {
+    logger.error('[Mafia] Failed to check balance:', error);
+    return interaction.followUp({ content: '❌ حدث خطأ غير متوقع', ephemeral: true });
+  }
+
   // Charge coins
   try {
     await CurrencyService.spendCoins(userId, HINT_COST, 'PERK_PURCHASE', 'MAFIA', {
@@ -869,15 +893,6 @@ async function handleHintPurchase(ctx, gs) {
       roundNumber: gs.roundNumber,
     });
   } catch (error) {
-    // Check if it's an insufficient balance error
-    if (error.code === 'INSUFFICIENT_BALANCE' || error.name === 'InsufficientBalanceError') {
-      let balance = 0;
-      try { balance = await CurrencyService.getBalance(userId); } catch (e) { logger.warn('[Mafia] Failed to get balance:', e.message); }
-      return interaction.followUp({
-        content: MESSAGES.HINT_NO_BALANCE(HINT_COST, balance),
-        ephemeral: true,
-      });
-    }
     logger.error('[Mafia] Hint purchase error:', error);
     return interaction.followUp({ content: '❌ حدث خطأ غير متوقع', ephemeral: true });
   }
@@ -889,7 +904,7 @@ async function handleHintPurchase(ctx, gs) {
   const aliveNonMafia = Object.values(gs.players).filter(p => p.alive && p.role !== ROLES.MAFIA);
 
   if (aliveMafia.length === 0 || aliveNonMafia.length === 0) {
-    return interaction.followUp({ content: MESSAGES.WRONG_PHASE, ephemeral: true });
+    return interaction.followUp({ content: '❌ لا يمكن توفير تلميح في الوضع الحالي', ephemeral: true });
   }
 
   const m = aliveMafia[randomInt(aliveMafia.length)];
@@ -1076,6 +1091,11 @@ function findPlayerByRole(gs, role) {
 
 async function changePhase(gs, session, newPhase) {
   gs.timeouts.clear('phase');
+  // Clear any pending vote updates when phase changes (BUG-011 fix)
+  if (gs.pendingVoteUpdate) {
+    clearTimeout(gs.pendingVoteUpdate);
+    gs.pendingVoteUpdate = null;
+  }
   gs.phase = newPhase;
   session.phase = newPhase;
   session.uiVersion = (session.uiVersion || 0) + 1;

@@ -64,11 +64,11 @@ export const NIGHT_PHASES = new Set([
 // Key = player count, value = role counts
 
 export const ROLE_DISTRIBUTIONS = {
-  5:  { MAFIA: 1, DOCTOR: 1, DETECTIVE: 0, CITIZEN: 3 },
-  6:  { MAFIA: 2, DOCTOR: 1, DETECTIVE: 0, CITIZEN: 3 },
-  7:  { MAFIA: 2, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 3 },
-  8:  { MAFIA: 3, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 3 },
-  9:  { MAFIA: 3, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 4 },
+  5: { MAFIA: 1, DOCTOR: 1, DETECTIVE: 0, CITIZEN: 3 },
+  6: { MAFIA: 2, DOCTOR: 1, DETECTIVE: 0, CITIZEN: 3 },
+  7: { MAFIA: 2, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 3 },
+  8: { MAFIA: 3, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 3 },
+  9: { MAFIA: 3, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 4 },
   10: { MAFIA: 3, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 5 },
   11: { MAFIA: 3, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 6 },
   12: { MAFIA: 4, DOCTOR: 1, DETECTIVE: 1, CITIZEN: 6 },
@@ -202,6 +202,8 @@ export const MESSAGES = {
   DEAD_BLOCKED: '💀 أنت ميت ولا يمكنك التفاعل مع اللعبة',
   WRONG_PHASE: '❌ لا يمكنك الضغط الآن',
   NOT_YOUR_TURN: '❌ ليس دورك الآن',
+  INVALID_TARGET: '❌ هذا الهدف غير صالح',
+  CANNOT_PROTECT_SAME_TWICE: '❌ لا يمكنك حماية نفس اللاعب مرتين متتاليتين',
   HINT_WRONG_PHASE: '❌ التلميح متاح فقط أثناء التصويت',
   HINT_ALREADY_USED: '❌ استخدمت تلميح هذه الجولة بالفعل',
   HINT_NO_BALANCE: (needed, have) => `❌ رصيدك غير كافٍ! تحتاج: ${needed} | لديك: ${have}`,
