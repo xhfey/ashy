@@ -1175,6 +1175,21 @@ async function endGame(gameState, session, winner) {
   // CRITICAL FIX: Use atomic phase transition (clears timeout automatically)
   changePhase(gameState, 'GAME_END');
 
+  // FIX R3: Handle null winner (corruption where all players eliminated)
+  if (!winner) {
+    logger.error(`[Roulette] endGame called with null winner for session ${session.id}`);
+    await gameState.channel.send({
+      content: '⚠️ انتهت اللعبة بدون فائز بسبب خطأ. يرجى التواصل مع الإدارة.',
+    });
+    try {
+      await SessionService.endSession(gameState.sessionId, null, 'NO_WINNER');
+    } catch (error) {
+      logger.error('[Roulette] Failed to end session (no winner):', error);
+    }
+    cleanupGame(gameState.sessionId);
+    return;
+  }
+
   let endReason = 'COMPLETED';
 
   let rewardResult = null;

@@ -759,13 +759,14 @@ async function handleMafiaVote(ctx, gs, targetId) {
   const targets = getAliveNonMafia(gs);
   const pickMention = `<@${targetId}>`;
 
-  // Early Phase End
-  await checkPhaseCompletion(gs, session);
-
-  return interaction.update({
+  // FIX M2: Update UI before checking phase completion to avoid stale data
+  await interaction.update({
     content: `${MESSAGES.MAFIA_ACTION_TITLE}\n${MESSAGES.MAFIA_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.MAFIA_VOTE),
   });
+
+  // Early Phase End (may advance game loop)
+  await checkPhaseCompletion(gs, session);
 }
 
 async function handleDoctorProtect(ctx, gs, targetId) {
@@ -799,13 +800,13 @@ async function handleDoctorProtect(ctx, gs, targetId) {
   const targets = getAlivePlayers(gs).filter(p => p.userId !== gs.lastDoctorProtectedUserId);
   const pickMention = `<@${targetId}>`;
 
-  // Early Phase End
-  await checkPhaseCompletion(gs, session);
-
-  return interaction.update({
+  // FIX M2: Update UI before checking phase completion to avoid stale data
+  await interaction.update({
     content: `${MESSAGES.DOCTOR_ACTION_TITLE}\n${MESSAGES.DOCTOR_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DOCTOR_PROTECT),
   });
+
+  await checkPhaseCompletion(gs, session);
 }
 
 async function handleDetectiveCheck(ctx, gs, targetId) {
@@ -838,13 +839,13 @@ async function handleDetectiveCheck(ctx, gs, targetId) {
   const targets = getAlivePlayers(gs).filter(p => p.userId !== userId);
   const pickMention = `<@${targetId}>`;
 
-  // Early Phase End
-  await checkPhaseCompletion(gs, session);
-
-  return interaction.update({
+  // FIX M2: Update UI before checking phase completion to avoid stale data
+  await interaction.update({
     content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}\n${MESSAGES.DETECTIVE_LAST_RESULT(gs.detectiveLastResultText)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DETECTIVE_CHECK),
   });
+
+  await checkPhaseCompletion(gs, session);
 }
 
 async function handleDayVote(ctx, gs, targetId) {

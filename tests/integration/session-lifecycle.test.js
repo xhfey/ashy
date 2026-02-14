@@ -205,6 +205,7 @@ describe('Session lifecycle safety', () => {
     const p4 = await SessionService.joinSession({
       session: p3.session,
       user: makeUser('p4'),
+      preferredSlot: 4,
     });
 
     expect(p4.error).toBeUndefined();

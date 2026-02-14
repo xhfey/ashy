@@ -1,6 +1,6 @@
 # 🗺️ ASHY BOT - DEVELOPMENT ROADMAP
 
-## Current Status: Reliability + Expansion Foundation ✅ (Revised)
+## Current Status: Game Stability & Expansion ✅
 
 ### Public Command Model (Current Truth)
 - `/play` is the single public game launcher.
@@ -151,36 +151,22 @@
   - [x] Static layer caching (50%+ faster rendering)
   - [x] 1.5s final hold frames for loop clarity
 - [x] Wheel spins and lands on pre-selected player
-- [x] Kick selection with 30s timeout
+- [x] Kick selection with 15s timeout
 - [x] Double Kick perk (buy during kick turn)
 - [x] Shield reflects kick to attacker
 - [x] Extra Life survives one elimination
-- [x] Final round - wheel selects winner
-- [x] crypto.randomInt for roulette spins and slot randomness
-- [x] Coin rewards for winner
-- [x] Session cleanup
-
-  - [x] Smart color contrast (auto-adjust text brightness)
-  - [x] Static layer caching (50%+ faster rendering)
-  - [x] 1.5s final hold frames for loop clarity
-- [x] Wheel spins and lands on pre-selected player
-- [x] Kick selection with 30s timeout
-- [x] Double Kick perk (buy during kick turn)
-- [x] Shield reflects kick to attacker
-- [x] Extra Life survives one elimination
-- [x] Final round - wheel selects winner
+- [x] Final round - wheel selects kicker, perks apply
 - [x] crypto.randomInt for roulette spins and slot randomness
 - [x] Coin rewards for winner
 - [x] Session cleanup
 
 **Implementation Details:**
-- `src/commands/games/roulette/index.js` - Command & button handlers
-- `src/commands/games/roulette/WheelGenerator.js` - GIF generation with canvas + gif-encoder-2
-- `src/commands/games/roulette/embeds.js` - All embed builders
-- `src/commands/games/roulette/buttons.js` - Button component builders
-- `src/commands/games/roulette/perks.js` - Perk logic (purchase, use, shield/extra life)
-- `src/commands/games/roulette/constants.js` - Colors, settings, prices
-- `src/assets/roulette/` - Asset files (with fallback rendering)
+- `src/games/roulette/roulette.game.js` - Main game logic with lock-based concurrency
+- `src/games/roulette/WheelGenerator.js` - GIF generation with canvas + gif-encoder-2
+- `src/games/roulette/roulette.embeds.js` - All embed builders
+- `src/games/roulette/roulette.buttons.js` - Button component builders
+- `src/games/roulette/roulette.perks.js` - Perk logic (purchase, use, shield/extra life/double kick)
+- `src/games/roulette/roulette.constants.js` - Colors, settings, prices
 
 **Bug Fixes Applied (2026-01-29):**
 - ✅ **Critical**: Fixed Data Loss where purchased perks vanished (Object vs Array mismatch)
@@ -279,13 +265,78 @@
 
 ---
 
-## Phase 7-12: Remaining Games ⬜
-- [ ] Phase 7: XO (Tic-tac-toe tournament)
-- [ ] Phase 8: Chairs (Musical chairs)
-- [ ] Phase 9: Mafia (Social deduction)
-- [ ] Phase 10: Hide & Seek
-- [ ] Phase 11: Replica, Guess Country
-- [ ] Phase 12: Hot XO, Death Wheel
+## Phase 7: Mafia ✅
+**Goal:** Social deduction game with night/day phases
+
+- [x] Mafia available from `/play` (public in game registry)
+- [x] Simple lobby (5-15 players)
+- [x] Role assignment: Mafia, Doctor, Detective, Citizen
+  - [x] Fisher-Yates shuffle for fair distribution
+  - [x] Role count scales with player count (detective disabled < 7 players)
+- [x] Night phases with private DM-style interactions
+  - [x] Mafia votes on kill target (consensus required)
+  - [x] Doctor chooses player to protect (can't self-protect twice in a row)
+  - [x] Detective investigates a player's role
+- [x] Day discussion phase with countdown timer
+- [x] Day voting phase with live vote count display
+  - [x] Throttled vote UI updates (750ms) to respect Discord rate limits
+  - [x] Tie = no expulsion, skip votes supported
+- [x] Win conditions: All mafia dead (citizens win) or mafia >= non-mafia (mafia wins)
+- [x] Mafia forfeit: 2 consecutive nights with no votes → citizens win
+- [x] Canvas role card image generation (981 lines)
+- [x] Hint shop: Citizens can buy hints about mafia identity during day phase
+- [x] Coin rewards for winning team (alive winners get more)
+- [x] Concurrency control via promise-queue locking (`withLock`)
+- [x] Phase timeout handling with `TimeoutManager`
+- [x] Cancellable delays via `AbortController`
+- [x] Control panel embed updated each phase
+- [x] Session cleanup
+
+**Implementation Details:**
+- `src/games/mafia/mafia.game.js` - Main game logic (1386 lines) with phase state machine
+- `src/games/mafia/mafia.constants.js` - Roles, phases, messages, role distributions
+- `src/games/mafia/mafia.buttons.js` - Night action + day vote button builders
+- `src/games/mafia/mafia.embeds.js` - Control panel and result embeds
+- `src/games/mafia/mafia.images.js` - Canvas role card generation with visual config
+- `src/config/mafia.visual.config.js` - Role card visual theme configuration
+
+**Test:** Full game flow with 5+ players, all roles functional, winner gets coins
+
+---
+
+## Phase 7.1: Deep Game Analysis & Bug Fixes ✅
+**Goal:** Comprehensive audit of all three games for production readiness
+
+Deployed parallel analysis agents across Dice, Roulette, and Mafia. Found 27 potential issues, validated against actual framework behavior (ButtonRouter `deferUpdate`, `withLock` queue resilience, turn index bounds), confirmed 5 real bugs.
+
+### Bugs Fixed (2026-02-14)
+- [x] **D1 (Dice)**: Block race condition — timer callback could fire during async yield between `blockTimer.clear()` and `applyBlock`. Fixed by clearing `turnState.waiting` immediately after timer clear.
+- [x] **D4 (Dice)**: Null message in `handleSkip` on timeout — `message.edit()` called on null. Fixed with `gameState.currentMessage` fallback.
+- [x] **D6 (Dice)**: TIE stat recording failures silently swallowed by `Promise.allSettled`. Fixed by logging rejected results.
+- [x] **R3 (Roulette)**: Null winner crash in `endGame` — if `alivePlayers.length === 0`, `winner.userId` threw TypeError. Fixed with null check and early return with error message.
+- [x] **M2 (Mafia)**: Night action ordering — `checkPhaseCompletion()` ran before `interaction.update()`, causing stale UI. Fixed by swapping order in all 3 handlers (handleMafiaVote, handleDoctorProtect, handleDetectiveCheck).
+
+### Test Fixes (2026-02-14)
+- [x] `session-lifecycle.test.js`: Slot assignment test expected deterministic slot 4 but `randomInt` picked from 17 empty slots. Fixed by passing `preferredSlot: 4`.
+- [x] `roulette-game-flow.test.js`: Two tests timing out because `transaction.service.js` wasn't mocked — Prisma tried to connect to a real database, causing Tokio runtime panic. Fixed by adding mock.
+
+**Files Modified:**
+- `src/games/dice/dice.game.js` — D1, D4, D6
+- `src/games/roulette/roulette.game.js` — R3
+- `src/games/mafia/mafia.game.js` — M2
+- `tests/integration/session-lifecycle.test.js` — Slot test fix
+- `tests/integration/roulette-game-flow.test.js` — Missing mock fix
+
+**Test:** 28/28 passing ✅
+
+---
+
+## Phase 8-12: Remaining Games ⬜
+- [ ] Phase 8: RPS (Rock-Paper-Scissors)
+- [ ] Phase 9: XO (Tic-tac-toe tournament)
+- [ ] Phase 10: Chairs (Musical chairs)
+- [ ] Phase 11: Hide & Seek
+- [ ] Phase 12: Replica, Guess Country, Hot XO, Death Wheel
 
 ---
 
@@ -338,6 +389,9 @@
 | 2026-02-06 | Randomize extra player team | Always giving Team A the extra player was predictable/unfair |
 | 2026-02-06 | Show reward amount to winners | Players should see how many coins they earned |
 | 2026-02-06 | In-memory sessions (no Redis) | Simpler architecture; players just restart games after bot restart |
+| 2026-02-14 | ButtonRouter defers all interactions | Game handlers don't need to defer — framework handles it |
+| 2026-02-14 | Promise-queue locks for concurrency | withLock pattern prevents race conditions in roulette/mafia |
+| 2026-02-14 | AbortController for cancellable delays | safeDelay can be cancelled on game end, preventing zombie operations |
 
 ---
 
@@ -348,7 +402,6 @@ _None currently_
 ## Technical Debt ⚠️
 - [ ] **Magic Numbers**: Gameplay constants (timeouts, rewards) are scattered in `constants.js` and `index.js`. Should be centralized.
 - [ ] **Type Safety**: Interaction between Game Logic and Session Service relies on implicit contracts (e.g. `perks` array structure).
-- [ ] **Non-Cancellable Delays**: `delay()` promises can't be cancelled; cancelled games rely on `isGameCancelled` checks after each delay.
 
 ## Technical Debt Resolved ✅
 - [x] **Event Loop Blocking**: GIF/image generation now yields every 2 frames with `setImmediate`
@@ -359,10 +412,22 @@ _None currently_
 - [x] **Loss/Tie Stats**: `totalLosses`, `totalGames`, `weeklyGames` now tracked for all players (not just winners)
 - [x] **Orphaned Sessions**: Error-caused cancellations now properly call `SessionService.endSession()`
 - [x] **Graceful Shutdown**: Image cache interval `.unref()`'d so it doesn't block process exit
+- [x] **Non-Cancellable Delays**: Games now use `AbortController` + `safeDelay` pattern for cancellable delays
 
 ---
 
 ## Recent Bug Fixes
+
+### 2026-02-14: Deep Game Analysis
+| Bug | Game | Fix |
+|-----|------|-----|
+| Block race condition (D1) | Dice | Clear `turnState.waiting` immediately after timer clear |
+| Null message on timeout (D4) | Dice | Fallback to `gameState.currentMessage` |
+| TIE stats silently swallowed (D6) | Dice | Log rejected Promise.allSettled results |
+| Null winner crash (R3) | Roulette | Null check + early return with error message |
+| Night action ordering (M2) | Mafia | `interaction.update()` before `checkPhaseCompletion()` |
+| Slot test non-deterministic | Tests | Pass `preferredSlot: 4` for deterministic assignment |
+| Roulette tests timing out | Tests | Add missing `transaction.service.js` mock |
 
 ### 2026-01-29: Dice Game Polish
 | Bug | Fix |

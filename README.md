@@ -5,7 +5,7 @@ Arabic Discord gaming bot with a `/play` game hub and production-focused reliabi
 ## ✨ Features
 
 - 🎮 `/play` hub (public games are loaded dynamically from registry)
-- 🎲 Fully implemented: Dice + Roulette
+- 🎲 Fully implemented: Dice, Roulette, Mafia
 - 🧪 Unfinished games remain hidden until fully playable
 - 💰 Virtual currency (Ashy Coins)
 - 🏆 Weekly leaderboards
@@ -14,6 +14,7 @@ Arabic Discord gaming bot with a `/play` game hub and production-focused reliabi
 - 🚩 Guild-based feature flags for staged game rollout
 - 🎡 Premium Roulette: AAA-quality GIF generator with 2x supersampling, physics-based easing, motion blur, and 20-slot lobby.
 - 🎲 Dice rolls use crypto RNG with fair 1/6 distribution and team-based gameplay.
+- 🔫 Mafia: Social deduction with night/day phases, 4 roles (Mafia, Doctor, Detective, Citizen), canvas role cards, and hint shop.
 - ⚡ Instant-feedback buttons for faster-feeling gameplay (dice decisions + lobby actions).
 
 ## 🚀 Quick Start
@@ -98,13 +99,15 @@ See `CLAUDE.md` for complete documentation and `docs/lessons_learned.md` for dev
 
 See `ROADMAP.md` for current progress.
 
-Current focus: **Reliability + Expansion Foundation** ✅
+Current focus: **Game Stability & Expansion** ✅
 - `/play` is the only public start path
+- Three games live: Dice, Roulette, Mafia
 - In-memory session management with proper cleanup on errors and cancellations
 - Unified cancellation path used by `/stop`, countdown, and error recovery
 - Atomic game reward + `GameStat` updates with idempotency guards
 - Full win/loss/tie stats tracking for all players
 - Weekly leaderboard reset + payout job enabled
+- 28/28 integration tests passing
 
 ## 🤖 For AI Developers
 

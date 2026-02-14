@@ -235,6 +235,9 @@ async function handleBlockTargetFromCtx(ctx, gameState, targetId) {
   }
 
   gameState.blockTimer.clear();
+  // FIX D1: Immediately clear waiting state to prevent race with timer callback
+  // (timer callback checks waiting === 'BLOCK_TARGET' before acting)
+  gameState.turnState.waiting = null;
 
   const currentPlayer = getCurrentPlayer(gameState);
   const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
@@ -578,13 +581,17 @@ export async function handleSkip(gameState, player, message, wasTimeout = false)
     gameState.turnState.waiting = null;
 
     // Update message (remove buttons) - PLAIN TEXT
-    try {
-      await message.edit({
-        content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
-        components: [],
-      });
-    } catch (e) {
-      logger.warn('[Dice] Failed to edit skip message:', e.message);
+    // FIX D4: Use gameState.currentMessage as fallback when message is null (timeout path)
+    const msgToEdit = message || gameState.currentMessage;
+    if (msgToEdit) {
+      try {
+        await msgToEdit.edit({
+          content: `<@${player.userId}>\n🎲 ${MESSAGES.ROLLED(firstRoll)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(player.totalScore)}`,
+          components: [],
+        });
+      } catch (e) {
+        logger.warn('[Dice] Failed to edit skip message:', e.message);
+      }
     }
 
     if (wasTimeout) {
@@ -1070,9 +1077,13 @@ async function endGame(gameState) {
         ...gameState.teamA.map(p => p.userId),
         ...gameState.teamB.map(p => p.userId),
       ];
-      await Promise.allSettled(
+      const tieResults = await Promise.allSettled(
         allPlayerIds.map(id => recordGameResult(id, 'DICE', 'TIE', statsMetadata))
       );
+      const tieFailed = tieResults.filter(r => r.status === 'rejected');
+      if (tieFailed.length > 0) {
+        logger.error(`[Dice] ${tieFailed.length}/${tieResults.length} TIE stat recordings failed:`, tieFailed.map(r => r.reason?.message || r.reason));
+      }
     }
 
     try {

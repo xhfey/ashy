@@ -34,14 +34,25 @@
         "matcher": "Write",
         "hooks": [
           {
-            "type": "command",
+            "type": "command", 
             "command": "if echo \"$TOOL_INPUT_PATH\" | grep -qE '\\.test\\.(js|ts)$'; then npm test -- --passWithNoTests 2>&1 | tail -20 || echo '{\"feedback\": \"Tests may have failed - please check\"}'; fi",
             "timeout": 30
           }
         ]
       }
     ],
-    "PreToolUse": []
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "BRANCH=$(git branch --show-current 2>/dev/null); if [ \"$BRANCH\" = \"main\" ] || [ \"$BRANCH\" = \"master\" ]; then echo '{\"block\": true, \"message\": \"⚠️ Cannot edit directly on main/master branch. Create a feature branch first.\"}' >&2; exit 2; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   },
   "mcpServers": {}
 }

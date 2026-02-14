@@ -70,6 +70,10 @@ jest.unstable_mockModule('../../src/framework/index.js', () => ({
 jest.unstable_mockModule('../../src/services/games/session.service.js', () => mockSessionService);
 jest.unstable_mockModule('../../src/services/economy/rewards.service.js', () => mockRewards);
 jest.unstable_mockModule('../../src/services/economy/currency.service.js', () => mockCurrencyService);
+jest.unstable_mockModule('../../src/services/economy/transaction.service.js', () => ({
+  recordGameResult: jest.fn(async () => ({})),
+  TransactionType: { GAME_LOSS: 'GAME_LOSS', GAME_TIE: 'GAME_TIE' },
+}));
 jest.unstable_mockModule('../../src/games/roulette/roulette.perks.js', () => mockPerks);
 jest.unstable_mockModule('../../src/games/roulette/WheelGenerator.js', () => ({
   generateWheelGif: jest.fn(async () => Buffer.from('gif')),

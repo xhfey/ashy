@@ -240,10 +240,10 @@ Located in `src/services/economy/` and `src/middleware/`:
 |-----------|---------------------|---------|--------|
 | DICE | ✅ | 2-10 | ✅ Complete |
 | ROULETTE | ✅ | 4-20 | ✅ Complete |
+| MAFIA | ✅ | 5-15 | ✅ Complete |
 | RPS | ❌ | 2-20 | ⬜ Not Started |
 | XO | ❌ | 2-6 | ⬜ Not Started |
 | CHAIRS | ❌ | 4-20 | ⬜ Not Started |
-| MAFIA | ❌ | 5-20 | ⬜ Not Started |
 | HIDESEEK | ❌ | 4-20 | ⬜ Not Started |
 | REPLICA | ❌ | 4-10 | ⬜ Not Started |
 | GUESS_COUNTRY | ❌ | 2-8 | ⬜ Not Started |
