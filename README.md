@@ -109,6 +109,12 @@ Current focus: **Game Stability & Expansion** ✅
 - Weekly leaderboard reset + payout job enabled
 - 28/28 integration tests passing
 
+## 🛠️ Latest Stability Updates (2026-02-14)
+
+- **Dice**: Winner `WIN` stats now recorded correctly, interaction handlers are fail-safe (`try/catch`), stale phase clicks no longer crash current-player lookup, and round arrays use `TOTAL_ROUNDS`.
+- **Roulette**: Fixed double-kick + shield reflection turn ownership, blocked eliminated players from shop/purchases, made delay flow cancellation-safe (no post-cancel sends), added second-kick timeout phase guard, and hardened final GIF null checks.
+- **Mafia**: Replaced post-defer `interaction.update()` calls with `editReply()`, added `guildMemberRemove` runtime handling so leave events can complete phases early, added compact `v2` custom IDs to stay under Discord's 100-char limit, and added day-vote fallback when vote message send fails.
+
 ## 🤖 For AI Developers
 
 **Read `CLAUDE.md` before making any changes.**

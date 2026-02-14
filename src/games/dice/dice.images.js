@@ -32,7 +32,7 @@ try {
   registerFont(path.join(fontPath, 'Cairo-Bold.ttf'), { family: 'Cairo', weight: '700' });
   registerFont(path.join(fontPath, 'RobotoMono-Bold.ttf'), { family: 'Roboto Mono', weight: '700' });
 } catch (e) {
-  console.warn('Failed to register custom fonts, falling back to system fonts:', e.message);
+  logger.warn('Failed to register custom fonts, falling back to system fonts:', e.message);
 }
 
 // Layout constants

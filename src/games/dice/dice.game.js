@@ -122,62 +122,71 @@ async function handleRollAgainFromCtx(ctx, gameState) {
     return;
   }
 
-  // Clear timeout
-  gameState.turnTimer.clear();
-
-  const currentPlayer = getCurrentPlayer(gameState);
-  const firstRoll = gameState.turnState.firstRoll;
-
-  // Perform second roll
-  const secondRoll = performSecondRoll(firstRoll, currentPlayer.hasBetterLuck);
-  gameState.turnState.secondRoll = secondRoll;
-  gameState.turnState.waiting = null;
-
-  // Increment uiVersion for stale-click detection
-  await bumpUiVersion(ctx, gameState);
-
-  // Show immediate feedback
   try {
-    await interaction.message.edit({
-      components: [buildDecisionButtons(gameState, 'ROLL', true)]
-    });
+    // Clear timeout
+    gameState.turnTimer.clear();
+
+    const currentPlayer = getCurrentPlayer(gameState);
+    if (!currentPlayer) {
+      await interaction.followUp({ content: '❌ انتهى هذا الدور بالفعل', ephemeral: true });
+      return;
+    }
+
+    const firstRoll = gameState.turnState.firstRoll;
+
+    // Perform second roll
+    const secondRoll = performSecondRoll(firstRoll, currentPlayer.hasBetterLuck);
+    gameState.turnState.secondRoll = secondRoll;
+    gameState.turnState.waiting = null;
+
+    // Increment uiVersion for stale-click detection
+    await bumpUiVersion(ctx, gameState);
+
+    // Show immediate feedback
+    try {
+      await interaction.message.edit({
+        components: [buildDecisionButtons(gameState, 'ROLL', true)]
+      });
+    } catch (error) {
+      logger.warn('[Dice] Failed to update UI after roll:', error.message);
+    }
+
+    await delay(DECISION_FEEDBACK_DELAY_MS);
+    if (isGameCancelled(gameState)) return;
+
+    // Generate second roll image
+    let imageName;
+    if (secondRoll.type === 'NORMAL') {
+      imageName = secondRoll.value;
+    } else if (secondRoll.type === 'MODIFIER') {
+      imageName = secondRoll.display;
+    } else {
+      imageName = secondRoll.type;
+    }
+    const diceImage = await generateDiceImage(imageName);
+    const attachment = new AttachmentBuilder(diceImage, { name: 'dice2.png' });
+
+    // Handle different outcomes
+    switch (secondRoll.type) {
+      case 'X2':
+        await handleX2(interaction, gameState, currentPlayer, firstRoll, attachment);
+        break;
+      case 'BLOCK':
+        await handleBlock(interaction, gameState, currentPlayer, firstRoll, attachment);
+        break;
+      case 'ZERO':
+        await handleZero(interaction, gameState, currentPlayer, attachment);
+        break;
+      case 'MODIFIER':
+        await handleModifier(interaction, gameState, currentPlayer, firstRoll, secondRoll, attachment);
+        break;
+      case 'NORMAL':
+      default:
+        await handleNormalSecond(interaction, gameState, currentPlayer, secondRoll, attachment);
+        break;
+    }
   } catch (error) {
-    logger.warn('[Dice] Failed to update UI after roll:', error.message);
-  }
-
-  await delay(DECISION_FEEDBACK_DELAY_MS);
-  if (isGameCancelled(gameState)) return;
-
-  // Generate second roll image
-  let imageName;
-  if (secondRoll.type === 'NORMAL') {
-    imageName = secondRoll.value;
-  } else if (secondRoll.type === 'MODIFIER') {
-    imageName = secondRoll.display;
-  } else {
-    imageName = secondRoll.type;
-  }
-  const diceImage = await generateDiceImage(imageName);
-  const attachment = new AttachmentBuilder(diceImage, { name: 'dice2.png' });
-
-  // Handle different outcomes
-  switch (secondRoll.type) {
-    case 'X2':
-      await handleX2(interaction, gameState, currentPlayer, firstRoll, attachment);
-      break;
-    case 'BLOCK':
-      await handleBlock(interaction, gameState, currentPlayer, firstRoll, attachment);
-      break;
-    case 'ZERO':
-      await handleZero(interaction, gameState, currentPlayer, attachment);
-      break;
-    case 'MODIFIER':
-      await handleModifier(interaction, gameState, currentPlayer, firstRoll, secondRoll, attachment);
-      break;
-    case 'NORMAL':
-    default:
-      await handleNormalSecond(interaction, gameState, currentPlayer, secondRoll, attachment);
-      break;
+    await handleGameError(gameState, error, 'handleRollAgainFromCtx');
   }
 }
 
@@ -197,25 +206,34 @@ async function handleSkipFromCtx(ctx, gameState) {
     return;
   }
 
-  // Clear timeout to avoid double-processing on edge timing
-  gameState.turnTimer.clear();
-
-  // Increment uiVersion for stale-click detection
-  await bumpUiVersion(ctx, gameState);
-
   try {
-    await interaction.message.edit({
-      components: [buildDecisionButtons(gameState, 'SKIP', true)]
-    });
+    // Clear timeout to avoid double-processing on edge timing
+    gameState.turnTimer.clear();
+
+    // Increment uiVersion for stale-click detection
+    await bumpUiVersion(ctx, gameState);
+
+    try {
+      await interaction.message.edit({
+        components: [buildDecisionButtons(gameState, 'SKIP', true)]
+      });
+    } catch (error) {
+      logger.warn('[Dice] Failed to update UI after skip:', error.message);
+    }
+
+    await delay(DECISION_FEEDBACK_DELAY_MS);
+    if (isGameCancelled(gameState)) return;
+
+    const currentPlayer = getCurrentPlayer(gameState);
+    if (!currentPlayer) {
+      await interaction.followUp({ content: '❌ انتهى هذا الدور بالفعل', ephemeral: true });
+      return;
+    }
+
+    await handleSkip(gameState, currentPlayer, interaction.message, false);
   } catch (error) {
-    logger.warn('[Dice] Failed to update UI after skip:', error.message);
+    await handleGameError(gameState, error, 'handleSkipFromCtx');
   }
-
-  await delay(DECISION_FEEDBACK_DELAY_MS);
-  if (isGameCancelled(gameState)) return;
-
-  const currentPlayer = getCurrentPlayer(gameState);
-  await handleSkip(gameState, currentPlayer, interaction.message, false);
 }
 
 /**
@@ -234,39 +252,48 @@ async function handleBlockTargetFromCtx(ctx, gameState, targetId) {
     return;
   }
 
-  gameState.blockTimer.clear();
-  // FIX D1: Immediately clear waiting state to prevent race with timer callback
-  // (timer callback checks waiting === 'BLOCK_TARGET' before acting)
-  gameState.turnState.waiting = null;
-
-  const currentPlayer = getCurrentPlayer(gameState);
-  const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
-  const teamLetter = gameState.phase === 'TEAM_A' ? 'B' : 'A';
-  const target = oppositeTeam.find(p => p.userId === targetId);
-
-  if (!target) {
-    await interaction.followUp({ content: '❌ لاعب غير موجود', ephemeral: true });
-    return;
-  }
-
-  const firstRoll = gameState.turnState.firstRoll;
-  const turnScore = applyMultiplier(firstRoll, currentPlayer.scoreMultiplier);
-  const multiplierLine = formatMultiplierLine(currentPlayer.scoreMultiplier, turnScore);
-
-  // Increment uiVersion
-  await bumpUiVersion(ctx, gameState);
-
-  // Update message
   try {
-    await interaction.message.edit({
-      content: `✅ ${MESSAGES.BLOCKED_PLAYER(`<@${target.userId}>`)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(currentPlayer.totalScore + turnScore)}`,
-      components: [],
-    });
-  } catch (error) {
-    logger.warn('[Dice] Failed to update UI after block:', error.message);
-  }
+    gameState.blockTimer.clear();
+    // Immediately clear waiting state to prevent race with timer callback
+    // (timer callback checks waiting === 'BLOCK_TARGET' before acting)
+    gameState.turnState.waiting = null;
 
-  await applyBlock(gameState, currentPlayer, target, teamLetter, false, false);
+    const currentPlayer = getCurrentPlayer(gameState);
+    if (!currentPlayer) {
+      await interaction.followUp({ content: '❌ انتهى هذا الدور بالفعل', ephemeral: true });
+      return;
+    }
+
+    const oppositeTeam = gameState.phase === 'TEAM_A' ? gameState.teamB : gameState.teamA;
+    const teamLetter = gameState.phase === 'TEAM_A' ? 'B' : 'A';
+    const target = oppositeTeam.find(p => p.userId === targetId);
+
+    if (!target) {
+      await interaction.followUp({ content: '❌ لاعب غير موجود', ephemeral: true });
+      return;
+    }
+
+    const firstRoll = gameState.turnState.firstRoll;
+    const turnScore = applyMultiplier(firstRoll, currentPlayer.scoreMultiplier);
+    const multiplierLine = formatMultiplierLine(currentPlayer.scoreMultiplier, turnScore);
+
+    // Increment uiVersion
+    await bumpUiVersion(ctx, gameState);
+
+    // Update message
+    try {
+      await interaction.message.edit({
+        content: `✅ ${MESSAGES.BLOCKED_PLAYER(`<@${target.userId}>`)}${multiplierLine}\n${MESSAGES.CURRENT_SCORE(currentPlayer.totalScore + turnScore)}`,
+        components: [],
+      });
+    } catch (error) {
+      logger.warn('[Dice] Failed to update UI after block:', error.message);
+    }
+
+    await applyBlock(gameState, currentPlayer, target, teamLetter, false, false);
+  } catch (error) {
+    await handleGameError(gameState, error, 'handleBlockTargetFromCtx');
+  }
 }
 
 async function handleGameError(gameState, error, context) {
@@ -1068,10 +1095,23 @@ async function endGame(gameState) {
         }
       }
 
-      // Record losses (allSettled = never throws)
-      await Promise.allSettled(
-        loserIds.map(id => recordGameResult(id, 'DICE', 'LOSS', statsMetadata))
-      );
+      // Record winner/loser stats (allSettled = never throws)
+      const [winResults, lossResults] = await Promise.all([
+        Promise.allSettled(
+          winnerIds.map(id => recordGameResult(id, 'DICE', 'WIN', statsMetadata))
+        ),
+        Promise.allSettled(
+          loserIds.map(id => recordGameResult(id, 'DICE', 'LOSS', statsMetadata))
+        ),
+      ]);
+      const winFailed = winResults.filter(r => r.status === 'rejected');
+      const lossFailed = lossResults.filter(r => r.status === 'rejected');
+      if (winFailed.length > 0) {
+        logger.error(`[Dice] ${winFailed.length}/${winResults.length} WIN stat recordings failed:`, winFailed.map(r => r.reason?.message || r.reason));
+      }
+      if (lossFailed.length > 0) {
+        logger.error(`[Dice] ${lossFailed.length}/${lossResults.length} LOSS stat recordings failed:`, lossFailed.map(r => r.reason?.message || r.reason));
+      }
     } else {
       const allPlayerIds = [
         ...gameState.teamA.map(p => p.userId),
@@ -1105,8 +1145,19 @@ async function endGame(gameState) {
  * Get current player
  */
 function getCurrentPlayer(gameState) {
-  const team = gameState.phase === 'TEAM_A' ? gameState.teamA : gameState.teamB;
-  return team[gameState.currentPlayerIndex];
+  const turnPlayerId = gameState?.turnState?.playerId;
+  if (turnPlayerId) {
+    return gameState.teamA.find(p => p.userId === turnPlayerId)
+      || gameState.teamB.find(p => p.userId === turnPlayerId)
+      || null;
+  }
+  if (gameState.phase === 'TEAM_A') {
+    return gameState.teamA[gameState.currentPlayerIndex] || null;
+  }
+  if (gameState.phase === 'TEAM_B') {
+    return gameState.teamB[gameState.currentPlayerIndex] || null;
+  }
+  return null;
 }
 
 /**

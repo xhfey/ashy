@@ -314,7 +314,7 @@ Deployed parallel analysis agents across Dice, Roulette, and Mafia. Found 27 pot
 - [x] **D4 (Dice)**: Null message in `handleSkip` on timeout — `message.edit()` called on null. Fixed with `gameState.currentMessage` fallback.
 - [x] **D6 (Dice)**: TIE stat recording failures silently swallowed by `Promise.allSettled`. Fixed by logging rejected results.
 - [x] **R3 (Roulette)**: Null winner crash in `endGame` — if `alivePlayers.length === 0`, `winner.userId` threw TypeError. Fixed with null check and early return with error message.
-- [x] **M2 (Mafia)**: Night action ordering — `checkPhaseCompletion()` ran before `interaction.update()`, causing stale UI. Fixed by swapping order in all 3 handlers (handleMafiaVote, handleDoctorProtect, handleDetectiveCheck).
+- [x] **M2 (Mafia)**: Night action ordering — `checkPhaseCompletion()` ran before UI refresh, causing stale UI. Fixed by swapping order in all 3 handlers (handleMafiaVote, handleDoctorProtect, handleDetectiveCheck).
 
 ### Test Fixes (2026-02-14)
 - [x] `session-lifecycle.test.js`: Slot assignment test expected deterministic slot 4 but `randomInt` picked from 17 empty slots. Fixed by passing `preferredSlot: 4`.
@@ -328,6 +328,46 @@ Deployed parallel analysis agents across Dice, Roulette, and Mafia. Found 27 pot
 - `tests/integration/roulette-game-flow.test.js` — Missing mock fix
 
 **Test:** 28/28 passing ✅
+
+---
+
+## Phase 7.2: Game Readiness Report Remediation ✅
+**Goal:** Close high-severity production issues found in readiness review across Dice, Roulette, and Mafia.
+
+### Dice Fixes
+- [x] D1: Winners now record `WIN` stats (not only losers/ties).
+- [x] D2: `getCurrentPlayer()` now safely returns `null` in non-turn phases (`ROUND_END`/`GAME_END`) instead of resolving invalid team/index state.
+- [x] D3: Wrapped `handleRollAgainFromCtx` in fail-safe error handling to prevent deadlock after timer clear.
+- [x] D4: Wrapped `handleSkipFromCtx` in fail-safe error handling to prevent deadlock after timer clear.
+- [x] D5: Wrapped `handleBlockTargetFromCtx` in fail-safe error handling to prevent permanent stalls if block application throws.
+- [x] D6: `roundScores`/`roundMeta` now derive from `TOTAL_ROUNDS` (no hardcoded `[0,0,0]`).
+- [x] D7: `dice.images.js` font-registration fallback now uses `logger.warn`.
+
+### Roulette Fixes
+- [x] R1: Double-kick + shield reflection no longer clears `currentKickerId` before second-kick prompt.
+- [x] R2: Eliminated players can no longer open shop or buy perks.
+- [x] R3: `safeDelay` now returns abort state and callers stop execution after cancellation.
+- [x] R4: Added null/empty final-round GIF buffer guard before `.length` access.
+- [x] R5: Added phase + kicker checks in double-kick timeout handler to avoid duplicate spin paths.
+- [x] R6: Elimination messaging no longer claims "next round starting" when game is ending.
+
+### Mafia Fixes
+- [x] M1: Replaced incompatible `interaction.update()` calls (after router defer) with `interaction.editReply()` for night actions.
+- [x] M2: Added `guildMemberRemove` runtime handling so leavers are marked dead, votes are cleaned, and phases can complete early.
+- [x] M3: Added compact `v2` `CustomIdCodec` format to keep action IDs under Discord's 100-char limit.
+- [x] M4: Day vote now auto-resolves gracefully if vote-message send fails.
+- [x] M5: Removed unused `obj1Width` variable in mafia image generation.
+
+**Files Modified:**
+- `src/games/dice/dice.game.js`
+- `src/games/dice/dice.mechanics.js`
+- `src/games/dice/dice.images.js`
+- `src/games/roulette/roulette.game.js`
+- `src/games/mafia/mafia.game.js`
+- `src/framework/interaction/CustomIdCodec.js`
+- `src/events/interactionCreate.js`
+- `src/events/guildMemberRemove.js`
+- `src/games/mafia/mafia.images.js`
 
 ---
 
@@ -392,6 +432,8 @@ Deployed parallel analysis agents across Dice, Roulette, and Mafia. Found 27 pot
 | 2026-02-14 | ButtonRouter defers all interactions | Game handlers don't need to defer — framework handles it |
 | 2026-02-14 | Promise-queue locks for concurrency | withLock pattern prevents race conditions in roulette/mafia |
 | 2026-02-14 | AbortController for cancellable delays | safeDelay can be cancelled on game end, preventing zombie operations |
+| 2026-02-14 | Compact `v2` custom IDs | Keep button/select custom IDs below Discord 100-char limit |
+| 2026-02-14 | Runtime guild-leave handling in Mafia | Prevents phases from waiting on players who left the server |
 
 ---
 
@@ -418,6 +460,13 @@ _None currently_
 
 ## Recent Bug Fixes
 
+### 2026-02-14: Game Readiness Report Remediation
+| Area | Key Fixes |
+|------|-----------|
+| Dice | Winner `WIN` stats, phase-safe `getCurrentPlayer`, fail-safe interaction handlers, `TOTAL_ROUNDS` arrays, logger consistency |
+| Roulette | Double-kick reflection ownership fix, dead-player shop guard, cancellation-safe delay flow, final GIF null guard, timeout phase guard |
+| Mafia | `editReply` night-action compatibility, guild leave event handling, compact `v2` custom IDs, vote-message failure fallback |
+
 ### 2026-02-14: Deep Game Analysis
 | Bug | Game | Fix |
 |-----|------|-----|
@@ -425,7 +474,7 @@ _None currently_
 | Null message on timeout (D4) | Dice | Fallback to `gameState.currentMessage` |
 | TIE stats silently swallowed (D6) | Dice | Log rejected Promise.allSettled results |
 | Null winner crash (R3) | Roulette | Null check + early return with error message |
-| Night action ordering (M2) | Mafia | `interaction.update()` before `checkPhaseCompletion()` |
+| Night action ordering (M2) | Mafia | Night-action UI update moved ahead of phase completion check |
 | Slot test non-deterministic | Tests | Pass `preferredSlot: 4` for deterministic assignment |
 | Roulette tests timing out | Tests | Add missing `transaction.service.js` mock |
 

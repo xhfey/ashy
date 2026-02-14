@@ -748,7 +748,6 @@ export async function generateTeamsBanner(dist, detectiveEnabled) {
     const obj1Text = 'الهدف : كشف المافيا قبل ما ينقتلون';
     const obj1X = CFG.objectives.team1.x;
     ctx.font = objFont;
-    const obj1Width = ctx.measureText(obj1Text).width;
     drawGlowText(ctx, obj1Text, obj1X, objY, {
       font: objFont,
       color: CFG.colors.team1,

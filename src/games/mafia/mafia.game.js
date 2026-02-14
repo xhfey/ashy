@@ -462,6 +462,7 @@ async function runDayVote(gs, session) {
   // Post vote message
   const alivePlayers = getAlivePlayers(gs);
   const voteCounts = computeVoteCounts(gs);
+  let voteMessagePosted = false;
 
   try {
     const voteMsg = await gs.channel.send({
@@ -469,9 +470,14 @@ async function runDayVote(gs, session) {
       components: Buttons.buildDayVoteButtons(session, alivePlayers, voteCounts),
     });
     gs.voteMessageId = voteMsg.id;
+    voteMessagePosted = true;
     await persistMafiaState(gs, session);
   } catch (error) {
     logger.error('[Mafia] Failed to send vote message:', error);
+    gs.voteMessageId = null;
+    await gs.channel.send({
+      content: '⚠️ تعذر إرسال رسالة التصويت. سيتم إنهاء التصويت تلقائيًا.',
+    }).catch(() => {});
   }
 
   gs.timeouts.set('phase', TIMERS.DAY_VOTE_MS, async () => {
@@ -480,6 +486,10 @@ async function runDayVote(gs, session) {
       resolveCurrentPhaseWait(gs);
     });
   });
+
+  if (!voteMessagePosted) {
+    resolveCurrentPhaseWait(gs);
+  }
 
   return promise;
 }
@@ -760,7 +770,7 @@ async function handleMafiaVote(ctx, gs, targetId) {
   const pickMention = `<@${targetId}>`;
 
   // FIX M2: Update UI before checking phase completion to avoid stale data
-  await interaction.update({
+  await interaction.editReply({
     content: `${MESSAGES.MAFIA_ACTION_TITLE}\n${MESSAGES.MAFIA_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.MAFIA_VOTE),
   });
@@ -801,7 +811,7 @@ async function handleDoctorProtect(ctx, gs, targetId) {
   const pickMention = `<@${targetId}>`;
 
   // FIX M2: Update UI before checking phase completion to avoid stale data
-  await interaction.update({
+  await interaction.editReply({
     content: `${MESSAGES.DOCTOR_ACTION_TITLE}\n${MESSAGES.DOCTOR_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DOCTOR_PROTECT),
   });
@@ -840,7 +850,7 @@ async function handleDetectiveCheck(ctx, gs, targetId) {
   const pickMention = `<@${targetId}>`;
 
   // FIX M2: Update UI before checking phase completion to avoid stale data
-  await interaction.update({
+  await interaction.editReply({
     content: `${MESSAGES.DETECTIVE_ACTION_TITLE}\n${MESSAGES.DETECTIVE_ACTION_PROMPT(getRunningPhaseEpoch(gs))}\n${MESSAGES.CURRENT_PICK(pickMention)}\n${MESSAGES.DETECTIVE_LAST_RESULT(gs.detectiveLastResultText)}`,
     components: Buttons.buildNightTargetButtons(session, targets, targetId, ACTIONS.DETECTIVE_CHECK),
   });
@@ -1155,6 +1165,29 @@ function resolveCurrentPhaseWait(gs) {
   }
 }
 
+function removePlayerVotes(gs, userId) {
+  gs.mafiaVotes.delete(userId);
+  gs.dayVotes.delete(userId);
+
+  for (const [voterId, targetId] of gs.mafiaVotes.entries()) {
+    if (targetId === userId) {
+      gs.mafiaVotes.delete(voterId);
+    }
+  }
+  for (const [voterId, targetId] of gs.dayVotes.entries()) {
+    if (targetId === userId) {
+      gs.dayVotes.delete(voterId);
+    }
+  }
+
+  if (gs.doctorProtectUserId === userId) {
+    gs.doctorProtectUserId = null;
+  }
+  if (gs.detectiveInvestigateUserId === userId) {
+    gs.detectiveInvestigateUserId = null;
+  }
+}
+
 function buildPersistedPlayers(gs) {
   return Object.fromEntries(
     Object.values(gs.players).map((p) => [
@@ -1373,6 +1406,51 @@ export function getActiveGameByChannel(channelId) {
     }
   }
   return null;
+}
+
+/**
+ * Handle guild member leaving during active mafia games.
+ * This prevents day/night phases from waiting on players who left the guild.
+ */
+export async function handleMafiaGuildMemberRemove(member) {
+  if (!member?.guild?.id || !member?.user?.id) return;
+
+  const affectedGames = [...activeGames.values()].filter(gs =>
+    gs?.channel?.guild?.id === member.guild.id && gs.state !== 'ENDED'
+  );
+
+  for (const gs of affectedGames) {
+    await withLock(gs.sessionId, async () => {
+      if (!activeGames.has(gs.sessionId) || gs.state === 'ENDED') return;
+
+      const player = gs.players[member.user.id];
+      if (!player || !player.alive) return;
+
+      player.alive = false;
+      removePlayerVotes(gs, member.user.id);
+      logger.info(`[Mafia] Player ${member.user.id} removed from active game ${gs.sessionId} (guild leave)`);
+
+      await gs.channel.send({
+        content: `🚪 <@${member.user.id}> غادر السيرفر وتم استبعاده من اللعبة.`,
+      }).catch(() => {});
+
+      const session = await sessionManager.load(gs.sessionId);
+      if (!session) return;
+
+      await persistMafiaState(gs, session);
+
+      const winResult = checkWinCondition(gs);
+      if (winResult) {
+        await endMafiaGame(gs, session, winResult);
+        return;
+      }
+
+      if (gs.phase === PHASES.DAY_VOTE) {
+        scheduleVoteMessageUpdate(gs, session);
+      }
+      await checkPhaseCompletion(gs, session);
+    });
+  }
 }
 
 export async function cancelMafiaGameByChannel(channelId, reason = 'CANCELLED') {

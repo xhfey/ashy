@@ -14,7 +14,7 @@ import * as CurrencyService from '../services/economy/currency.service.js';
 import { buildLobbyEmbed, buildLobbyComponents, buildShopEmbed, buildShopButtons } from '../utils/game-embeds.js';
 import { getPerk } from '../config/perks.config.js';
 import logger from '../utils/logger.js';
-import { buttonRouter } from '../framework/index.js';
+import { buttonRouter, codec } from '../framework/index.js';
 
 // Command name to slash command mapping for legacy button routing
 // (New games use v1 format via ButtonRouter)
@@ -50,7 +50,7 @@ export default {
     }
 
     if (interaction.isStringSelectMenu()) {
-      if (interaction.customId.startsWith('v1:')) {
+      if (codec.isSupportedFormat(interaction.customId)) {
         const handled = await buttonRouter.handleInteraction(interaction);
         if (handled) return;
       }
@@ -95,7 +95,7 @@ async function handleButton(interaction) {
   const customId = interaction.customId;
 
   // Try v1 format buttons (framework) first
-  if (customId.startsWith('v1:')) {
+  if (codec.isSupportedFormat(customId)) {
     const handled = await buttonRouter.handleInteraction(interaction);
     if (handled) return;
     // If not handled (no registered handler), fall through to legacy

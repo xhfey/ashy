@@ -10,6 +10,7 @@ import {
   SECOND_ROLL_NORMAL_CHANCE,
   SECOND_ROLL_SPECIAL_OUTCOMES,
   BETTER_LUCK_WEIGHTS,
+  TOTAL_ROUNDS,
 } from './dice.constants.js';
 
 /**
@@ -192,14 +193,16 @@ function randomFloat() {
  * @returns {Object} Player with game state
  */
 export function initializePlayerState(player, scoreMultiplier = 1.0) {
+  const roundScores = Array(TOTAL_ROUNDS).fill(0);
+  const roundMeta = Array(TOTAL_ROUNDS).fill(null);
   return {
     userId: player.userId,
     displayName: player.displayName,
     username: player.username,
     avatarURL: player.avatarURL,
     totalScore: 0,
-    roundScores: [0, 0, 0], // Scores for each round
-    roundMeta: [null, null, null], // Store turn details for each round
+    roundScores, // Scores for each round
+    roundMeta, // Store turn details for each round
     hasBetterLuck: player.perks?.includes('BETTER_LUCK') || false,
     blocked: false, // Blocked for current round
     wasBlockedThisRound: false, // Track if player was blocked (for summary display)
